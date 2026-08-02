@@ -373,6 +373,19 @@ test('generated class-name hashes are stripped from reported selectors', () => {
     assert.match(sanitizeSelector(hashedOnly), /no stable selector/, `must be flagged: ${hashedOnly}`)
   }
 
+  // Regression: a class followed by a pseudo-class or attribute selector was
+  // captured as one token, so the end-anchored hash test missed it entirely and
+  // the hash was printed verbatim in findings.
+  assert.equal(
+    sanitizeSelector('.styles-module__buttonWrapper___rBcdv:nth-child(1) > [data-active="false"]'),
+    '[data-active="false"]'
+  )
+  // Hash suffixes containing hyphens (___y-tDE) must also be caught.
+  assert.equal(
+    sanitizeSelector('.styles-module__settingsRow___y-tDE:nth-child(2) > [type="checkbox"]'),
+    '[type="checkbox"]'
+  )
+
   // Stable, authored hooks survive untouched.
   assert.equal(sanitizeSelector('nav.site-header > a.logo'), 'nav.site-header > a.logo')
   assert.equal(sanitizeSelector('[data-testid="submit"]'), '[data-testid="submit"]')

@@ -27,16 +27,20 @@ import type {
 export function sanitizeSelector(selector: string): string {
   const hashed = (c: string): boolean =>
     /^(css-|sc-|jsx-|emotion-|svelte-|_)/.test(c) ||
-    /__[A-Za-z0-9]{4,}$|___[A-Za-z0-9]{4,}$/.test(c) ||
+    /__[A-Za-z0-9][A-Za-z0-9_-]{3,}$/.test(c) ||
     /^[a-z]{1,2}[0-9a-z]{6,}$/.test(c) ||
     /^[a-f0-9]{6,}$/i.test(c)
 
+  // A class name ends at the next combinator, pseudo-class or attribute
+  // selector. Consuming those too meant `.foo___a1B2c:nth-child(1)` was tested
+  // as one token, the end-anchored hash patterns missed it, and the hash was
+  // printed verbatim.
   const cleaned = selector
     .split(/\s*>\s*/)
-    .map((step) =>
-      step.replace(/\.((?:\\.|[^.#\[\s])+)/g, (match, cls: string) => (hashed(cls) ? '' : match))
-    )
+    .map((step) => step.replace(/\.(-?[A-Za-z_][\w-]*)/g, (match, cls: string) => (hashed(cls) ? '' : match)))
     .map((step) => step.trim())
+    // `.foo___a1B2c:nth-child(1)` -> `:nth-child(1)` is meaningless on its own.
+    .map((step) => (step.startsWith(':') ? step.replace(/^(:[\w-]+(\([^)]*\))?)+/, '').trim() : step))
     .filter(Boolean)
     .join(' > ')
 
