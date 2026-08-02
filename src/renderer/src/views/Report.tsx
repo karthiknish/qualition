@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { CapturedPage, Finding, Run, RunProgress, Severity } from '../../../shared/types'
 import { api, CATEGORY_LABEL, cx, gradeColor, SEVERITY_COLOR } from '../lib/api'
-import { Badge, Bar, Button, Empty, Panel } from '../components/ui'
+import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
 
 type Tab =
   | 'overview'
@@ -34,7 +34,13 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
   const [catFilter, setCatFilter] = useState<string>('all')
   const [pageIdx, setPageIdx] = useState(0)
 
-  if (!run) return <div className="p-6"><Empty>No run selected.</Empty></div>
+  if (!run) {
+    return (
+      <div className="mx-auto max-w-3xl px-6 py-8">
+        <Empty title="No run selected">Open a run from History, or start a new audit.</Empty>
+      </div>
+    )
+  }
 
   const page: CapturedPage | undefined = run.pages[pageIdx]
   const findings = run.findings
@@ -42,41 +48,89 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
     .filter((f) => catFilter === 'all' || f.category === catFilter)
     .sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity))
 
+  const statusBadge =
+    run.status === 'done'
+      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+      : run.status === 'running' || run.status === 'queued'
+        ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+        : run.status === 'failed'
+          ? 'border-red-500/30 bg-red-500/10 text-red-300'
+          : run.status === 'cancelled'
+            ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+            : 'border-zinc-700 bg-zinc-800 text-zinc-400'
+
   return (
-    <div className="space-y-4 p-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0">
-          <h1 className="truncate text-lg font-semibold tracking-tight">{run.config.targetUrl}</h1>
-          <p className="text-[12px] text-zinc-500">
-            run {run.id} · {run.status}
-            {run.status === 'running' && progress ? ` · ${progress.phase} ${progress.pct}% — ${progress.msg}` : ''} ·{' '}
-            {run.pages.length} pages · {run.findings.length} findings · {run.config.brutality}
-          </p>
+    <div className="space-y-5 px-6 py-8">
+      <header className="animate-fade-up flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 max-w-3xl">
+          <p className="mb-1.5 text-[10px] font-medium uppercase tracking-[0.14em] text-zinc-500">Report</p>
+          <h1 className="truncate text-[22px] font-semibold tracking-tight text-zinc-50">{run.config.targetUrl}</h1>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-zinc-500">
+            <Badge className={statusBadge}>{run.status}</Badge>
+            <span className="tabular-nums text-zinc-600">{run.id}</span>
+            <span className="text-zinc-700">·</span>
+            <span>
+              {run.pages.length} page{run.pages.length === 1 ? '' : 's'}
+            </span>
+            <span className="text-zinc-700">·</span>
+            <span>{run.findings.length} findings</span>
+            <span className="text-zinc-700">·</span>
+            <span className="capitalize">{run.config.brutality}</span>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           <CopyPrompt runId={run.id} />
-          <Button size="sm" onClick={() => api.exportRun(run.id)}>Export markdown</Button>
-          <Button size="sm" variant="ghost" onClick={() => api.revealRun(run.id)}>Open files</Button>
+          <Button size="sm" onClick={() => api.exportRun(run.id)}>
+            Export markdown
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => api.revealRun(run.id)}>
+            Open files
+          </Button>
         </div>
       </header>
 
-      {run.error && (
-        <div className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-[12px] text-red-300">{run.error}</div>
+      {(run.status === 'running' || run.status === 'queued') && progress && (
+        <div className="rounded-2xl border border-sky-500/25 bg-sky-500/5 px-4 py-3">
+          <div className="flex items-center justify-between gap-3 text-[12px]">
+            <span className="flex items-center gap-2 text-sky-200">
+              <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-sky-400" />
+              {progress.phase}
+            </span>
+            <span className="tabular-nums text-zinc-400">{progress.pct}%</span>
+          </div>
+          <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
+            <div
+              className="h-full rounded-full bg-sky-400 transition-all duration-300"
+              style={{ width: `${progress.pct}%` }}
+            />
+          </div>
+          <p className="mt-2 text-[12px] leading-snug text-zinc-500">{progress.msg}</p>
+        </div>
       )}
 
-      <nav className="flex gap-1 border-b border-zinc-800">
-        {TABS.map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={cx(
-              '-mb-px border-b-2 px-3 py-2 text-[13px] capitalize',
-              tab === t ? 'border-zinc-100 text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'
-            )}
-          >
-            {t}
-          </button>
-        ))}
+      {run.error && (
+        <div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[13px] text-red-300">
+          {run.error}
+        </div>
+      )}
+
+      <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
+        <div className="flex gap-0.5 overflow-x-auto">
+          {TABS.map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={cx(
+                '-mb-px shrink-0 border-b-2 px-3 py-2.5 text-[13px] capitalize transition-colors',
+                tab === t
+                  ? 'border-zinc-100 text-zinc-100'
+                  : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
       </nav>
 
       {tab === 'overview' && <Overview run={run} />}
@@ -84,21 +138,29 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
       {tab === 'findings' && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-1.5">
-            <FilterChip active={sevFilter === 'all'} onClick={() => setSevFilter('all')}>all severities</FilterChip>
+            <Chip active={sevFilter === 'all'} onClick={() => setSevFilter('all')}>
+              all severities
+            </Chip>
             {SEV_ORDER.map((s) => (
-              <FilterChip key={s} active={sevFilter === s} onClick={() => setSevFilter(s)}>
+              <Chip key={s} active={sevFilter === s} onClick={() => setSevFilter(s)}>
                 {s} ({run.findings.filter((f) => f.severity === s).length})
-              </FilterChip>
+              </Chip>
             ))}
-            <span className="mx-1 w-px bg-zinc-800" />
-            <FilterChip active={catFilter === 'all'} onClick={() => setCatFilter('all')}>all categories</FilterChip>
+            <span className="mx-1 w-px self-stretch bg-zinc-800" />
+            <Chip active={catFilter === 'all'} onClick={() => setCatFilter('all')}>
+              all categories
+            </Chip>
             {Object.keys(CATEGORY_LABEL).map((c) => (
-              <FilterChip key={c} active={catFilter === c} onClick={() => setCatFilter(c)}>
+              <Chip key={c} active={catFilter === c} onClick={() => setCatFilter(c)}>
                 {c} ({run.findings.filter((f) => f.category === c).length})
-              </FilterChip>
+              </Chip>
             ))}
           </div>
-          {findings.length === 0 ? <Empty>Nothing matches the filter.</Empty> : findings.map((f) => <FindingCard key={f.id} f={f} />)}
+          {findings.length === 0 ? (
+            <Empty title="Nothing matches">Try clearing a severity or category filter.</Empty>
+          ) : (
+            findings.map((f) => <FindingCard key={f.id} f={f} />)
+          )}
         </div>
       )}
 
@@ -106,12 +168,12 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
         <div className="space-y-3">
           <div className="flex flex-wrap gap-1.5">
             {run.pages.map((p, i) => (
-              <FilterChip key={p.url} active={i === pageIdx} onClick={() => setPageIdx(i)}>
+              <Chip key={p.url} active={i === pageIdx} onClick={() => setPageIdx(i)}>
                 {new URL(p.url).pathname || '/'}
-              </FilterChip>
+              </Chip>
             ))}
           </div>
-          {!page ? <Empty>No pages captured.</Empty> : <Sections run={run} page={page} />}
+          {!page ? <Empty title="No pages captured">Wait for the crawl to finish.</Empty> : <Sections run={run} page={page} />}
         </div>
       )}
 
@@ -931,13 +993,13 @@ function Screens({ run }: { run: Run }): JSX.Element {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap gap-1.5">
-        <FilterChip active={vp === 'all'} onClick={() => setVp('all')}>
+        <Chip active={vp === 'all'} onClick={() => setVp('all')}>
           all ({shots.length})
-        </FilterChip>
+        </Chip>
         {viewports.map((v) => (
-          <FilterChip key={v} active={vp === v} onClick={() => setVp(v)}>
+          <Chip key={v} active={vp === v} onClick={() => setVp(v)}>
             {v}
-          </FilterChip>
+          </Chip>
         ))}
       </div>
 
@@ -1191,24 +1253,3 @@ function Stat({
   )
 }
 
-function FilterChip({
-  children,
-  active,
-  onClick
-}: {
-  children: React.ReactNode
-  active: boolean
-  onClick: () => void
-}): JSX.Element {
-  return (
-    <button
-      onClick={onClick}
-      className={cx(
-        'rounded-full border px-2.5 py-0.5 text-[11px]',
-        active ? 'border-zinc-500 bg-zinc-800 text-zinc-100' : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'
-      )}
-    >
-      {children}
-    </button>
-  )
-}

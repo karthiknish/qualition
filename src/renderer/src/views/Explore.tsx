@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { MobbinReference } from '../../../shared/types'
-import { api } from '../lib/api'
-import { Button, Empty, Input, Panel } from '../components/ui'
+import { api, cx } from '../lib/api'
+import { Button, Empty, Input, PageHeader, Panel } from '../components/ui'
 
 export default function Explore({ runId }: { runId?: string }): JSX.Element {
   const [mQuery, setMQuery] = useState('pricing section with plan cards and toggle')
@@ -12,6 +12,7 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
 
   const [rQuery, setRQuery] = useState('accordion')
   const [items, setItems] = useState<any[]>([])
+  const [rBusy, setRBusy] = useState(false)
 
   const searchMobbin = async (): Promise<void> => {
     setMBusy(true)
@@ -25,80 +26,124 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
     }
   }
 
+  const searchRegistry = async (): Promise<void> => {
+    setRBusy(true)
+    try {
+      setItems(await api.searchRegistry(rQuery))
+    } finally {
+      setRBusy(false)
+    }
+  }
+
   return (
-    <div className="grid grid-cols-2 gap-4 p-6">
-      <Panel
-        title="Mobbin reference search"
-        right={
-          <div className="flex gap-1">
-            {(['screen', 'section'] as const).map((k) => (
+    <div className="mx-auto max-w-6xl space-y-5 px-6 py-8">
+      <PageHeader
+        eyebrow="References"
+        title="Explore"
+        description="Pull shipped UI from Mobbin and find the registry primitive that should replace hand-rolled markup."
+      />
+
+      <div className="grid grid-cols-2 gap-4 animate-fade-up">
+        <Panel
+          title="Mobbin"
+          right={
+            <div className="flex rounded-lg border border-zinc-800 p-0.5">
+              {(['screen', 'section'] as const).map((k) => (
+                <button
+                  key={k}
+                  onClick={() => setKind(k)}
+                  className={cx(
+                    'rounded-md px-2.5 py-1 text-[11px] capitalize transition-colors',
+                    kind === k ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                  )}
+                >
+                  {k}s
+                </button>
+              ))}
+            </div>
+          }
+        >
+          <div className="flex gap-2">
+            <Input
+              value={mQuery}
+              onChange={setMQuery}
+              placeholder="Describe one screen or section in plain language"
+            />
+            <Button variant="primary" onClick={searchMobbin} disabled={mBusy}>
+              {mBusy ? '…' : 'Search'}
+            </Button>
+          </div>
+          {mError && <p className="mt-2 text-[12px] text-red-400">{mError}</p>}
+          <div className="mt-4 grid grid-cols-3 gap-2.5">
+            {refs.map((r, i) => (
               <button
-                key={k}
-                onClick={() => setKind(k)}
-                className={
-                  kind === k
-                    ? 'rounded-md bg-zinc-800 px-2 py-0.5 text-[11px] text-zinc-100'
-                    : 'rounded-md px-2 py-0.5 text-[11px] text-zinc-500'
-                }
+                key={i}
+                onClick={() => r.mobbinUrl && api.openExternal(r.mobbinUrl)}
+                className="group text-left"
               >
-                {k}s
+                {r.imageUrl && (
+                  <img
+                    src={r.imageUrl.startsWith('http') ? r.imageUrl : api.asset(r.imageUrl)}
+                    alt={r.title}
+                    className="h-44 w-full rounded-xl border border-zinc-800 object-cover object-top transition-[border-color,transform] group-hover:border-zinc-600 group-hover:scale-[1.01]"
+                  />
+                )}
+                <span className="mt-1.5 block truncate text-[11px] text-zinc-400 group-hover:text-zinc-200">
+                  {r.appName ?? r.title}
+                </span>
               </button>
             ))}
           </div>
-        }
-      >
-        <div className="flex gap-2">
-          <Input value={mQuery} onChange={setMQuery} placeholder="Describe one screen or section in plain language" />
-          <Button onClick={searchMobbin} disabled={mBusy}>{mBusy ? '…' : 'Search'}</Button>
-        </div>
-        {mError && <p className="mt-2 text-[12px] text-red-400">{mError}</p>}
-        <div className="mt-3 grid grid-cols-3 gap-2">
-          {refs.map((r, i) => (
-            <button key={i} onClick={() => r.mobbinUrl && api.openExternal(r.mobbinUrl)} className="text-left">
-              {r.imageUrl && (
-                <img
-                  src={r.imageUrl.startsWith('http') ? r.imageUrl : api.asset(r.imageUrl)}
-                  alt={r.title}
-                  className="h-40 w-full rounded-lg border border-zinc-800 object-cover object-top"
-                />
-              )}
-              <span className="mt-1 block truncate text-[11px] text-zinc-400">{r.appName ?? r.title}</span>
-            </button>
-          ))}
-        </div>
-        {refs.length === 0 && !mBusy && <Empty>Search shipped UI to compare against.</Empty>}
-      </Panel>
+          {refs.length === 0 && !mBusy && (
+            <Empty title="No references yet">Search shipped UI to compare against.</Empty>
+          )}
+        </Panel>
 
-      <Panel title="shadcn registry search">
-        <div className="flex gap-2">
-          <Input value={rQuery} onChange={setRQuery} placeholder="e.g. data table, pricing, sidebar, otp" />
-          <Button onClick={async () => setItems(await api.searchRegistry(rQuery))}>Search</Button>
-        </div>
-        <ul className="mt-3 space-y-1.5">
-          {items.map((i) => (
-            <li key={`${i.registry}/${i.name}`} className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-[13px] text-zinc-100">
-                  {i.name} <span className="text-[10px] uppercase text-zinc-600">{i.type.replace('registry:', '')}</span>
-                </span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(i.addCommand)}
-                  className="rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:text-zinc-100"
-                >
-                  {i.addCommand}
-                </button>
-              </div>
-              <p className="mt-0.5 text-[11px] text-zinc-500">{i.description}</p>
-              {i.docs && (
-                <button onClick={() => api.openExternal(i.docs)} className="mt-1 text-[10px] text-sky-400 hover:underline">
-                  docs
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-        {items.length === 0 && <Empty>Find the primitive that should replace hand-rolled markup.</Empty>}
-      </Panel>
+        <Panel title="Component registry">
+          <div className="flex gap-2">
+            <Input value={rQuery} onChange={setRQuery} placeholder="e.g. data table, pricing, sidebar, otp" />
+            <Button variant="primary" onClick={searchRegistry} disabled={rBusy}>
+              {rBusy ? '…' : 'Search'}
+            </Button>
+          </div>
+          <ul className="mt-4 space-y-2">
+            {items.map((i) => (
+              <li
+                key={`${i.registry}/${i.name}`}
+                className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3 transition-colors hover:border-zinc-700"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[13px] text-zinc-100">
+                    {i.name}{' '}
+                    <span className="text-[10px] uppercase tracking-wider text-zinc-600">
+                      {String(i.type).replace('registry:', '')}
+                    </span>
+                  </span>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(i.addCommand)}
+                    className="rounded-lg border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+                    title="Copy install command"
+                  >
+                    copy
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] leading-snug text-zinc-500">{i.description}</p>
+                {i.docs && (
+                  <button
+                    onClick={() => api.openExternal(i.docs)}
+                    className="mt-1.5 text-[10px] text-sky-400 hover:underline"
+                  >
+                    docs
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          {items.length === 0 && (
+            <Empty title="No components yet">Find the primitive that should replace hand-rolled markup.</Empty>
+          )}
+        </Panel>
+      </div>
     </div>
   )
 }

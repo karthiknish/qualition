@@ -9,7 +9,7 @@ import type {
   UpdateStatus
 } from '../../../shared/types'
 import { api, cx } from '../lib/api'
-import { Button, Input, Panel } from '../components/ui'
+import { Button, Field, Input, PageHeader, Panel } from '../components/ui'
 
 const PROVIDERS: { id: ProviderId; label: string; blurb: string; vision: boolean }[] = [
   { id: 'gemini', label: 'Gemini', blurb: 'Google AI Studio key. Vision + JSON schema.', vision: true },
@@ -73,7 +73,13 @@ export default function SettingsView({
     return api.onUpdateStatus(setUpdate)
   }, [refreshModels])
 
-  if (!s) return <div className="p-6 text-[13px] text-zinc-500">Loading…</div>
+  if (!s) {
+    return (
+      <div className="mx-auto max-w-4xl px-6 py-8 text-[13px] text-zinc-500 animate-pulse-soft">
+        Loading settings…
+      </div>
+    )
+  }
 
   const save = async (patch: Partial<Settings>): Promise<void> => {
     setSaving(true)
@@ -122,11 +128,19 @@ export default function SettingsView({
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4 p-6">
-      <h1 className="text-lg font-semibold tracking-tight">Settings</h1>
+    <div className="mx-auto max-w-4xl space-y-5 px-6 py-8">
+      <PageHeader
+        eyebrow="Preferences"
+        title="Settings"
+        description="Choose the model, wire MCP and Mobbin, and tune defaults for every new audit."
+      />
 
-      <Panel title="Model provider" right={saving ? <span className="text-[11px] text-zinc-500">working…</span> : null}>
-        <div className="grid grid-cols-3 gap-2">
+      <Panel
+        title="Model provider"
+        className="animate-fade-up"
+        right={saving ? <span className="text-[11px] text-zinc-500">working…</span> : null}
+      >
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
           {PROVIDERS.map((p) => (
             <button
               key={p.id}
@@ -135,8 +149,10 @@ export default function SettingsView({
                 void refreshModels(p.id)
               }}
               className={cx(
-                'rounded-lg border p-3 text-left',
-                s.provider === p.id ? 'border-zinc-500 bg-zinc-800/70' : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
+                'rounded-xl border p-3 text-left transition-colors',
+                s.provider === p.id
+                  ? 'border-zinc-400/50 bg-zinc-800/80 shadow-[inset_0_0_0_1px_rgb(255_255_255/0.04)]'
+                  : 'border-zinc-800 bg-zinc-950/40 hover:border-zinc-700'
               )}
             >
               <div className="flex items-center gap-1.5">
@@ -528,11 +544,3 @@ function describeUpdate(u: UpdateStatus | null, checking: boolean): string {
   }
 }
 
-function Field({ label, children }: { label: React.ReactNode; children: React.ReactNode }): JSX.Element {
-  return (
-    <div>
-      <label className="mb-1 block text-[12px] text-zinc-400">{label}</label>
-      {children}
-    </div>
-  )
-}

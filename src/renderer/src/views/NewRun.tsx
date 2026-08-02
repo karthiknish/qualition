@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import type { FlowStep, IntegrationStatus, Run, RunConfig, SavedCredential, Settings, Viewport } from '../../../shared/types'
 import { api, cx } from '../lib/api'
 import { isValidTarget, normalizeTargetUrl } from '../../../shared/url'
-import { Button, Input, Panel, Toggle } from '../components/ui'
+import { Button, Chip, Input, PageHeader, Panel, Segmented, Toggle } from '../components/ui'
 
-const BRUTALITY: { id: RunConfig['brutality']; label: string; blurb: string }[] = [
-  { id: 'fair', label: 'Fair', blurb: 'Issues that materially hurt users.' },
-  { id: 'harsh', label: 'Harsh', blurb: 'Release-blocking design-lead review.' },
-  { id: 'ruthless', label: 'Ruthless', blurb: 'Portfolio review. Nothing is good enough.' }
+const BRUTALITY: { id: RunConfig['brutality']; label: string; hint: string }[] = [
+  { id: 'fair', label: 'Fair', hint: 'Issues that materially hurt users.' },
+  { id: 'harsh', label: 'Harsh', hint: 'Release-blocking design-lead review.' },
+  { id: 'ruthless', label: 'Ruthless', hint: 'Portfolio review. Nothing is good enough.' }
 ]
 
 export default function NewRun({
@@ -129,18 +129,16 @@ export default function NewRun({
   const normalized = normalizeTargetUrl(url)
 
   return (
-    <div className="mx-auto max-w-5xl space-y-4 p-6">
-      <div>
-        <h1 className="text-lg font-semibold tracking-tight text-zinc-100">New audit</h1>
-        <p className="text-[13px] text-zinc-500">
-          Crawls the target in a real browser, measures the design system, replays flows, compares against
-          shipped UI from Mobbin, and names the components to replace.
-        </p>
-      </div>
+    <div className="relative mx-auto max-w-3xl space-y-5 px-6 pb-8 pt-8">
+      <PageHeader
+        eyebrow="Start"
+        title="New audit"
+        description="Crawls the target in a real browser, measures the design system, probes interactions, compares against shipped UI, and names what to replace."
+      />
 
-      <Panel title="Target">
-        <div className="space-y-3">
-          <Input value={url} onChange={setUrl} placeholder="https://yourapp.com · localhost:5173 · 127.0.0.1:3000" />
+      <Panel title="Target" className="animate-fade-up">
+        <div className="space-y-3.5">
+          <Input value={url} onChange={setUrl} placeholder="https://yourapp.com · localhost:5173 · 127.0.0.1:3000" autoFocus />
           {normalized && normalized.replace(/\/$/, '') !== url.trim().replace(/\/$/, '') && (
             <p className="-mt-1 text-[11px] text-zinc-500">
               will audit <span className="text-zinc-300">{normalized}</span>
@@ -152,7 +150,7 @@ export default function NewRun({
             placeholder="Product context — e.g. “B2B analytics SaaS, technical buyers, dark UI”"
           />
           <div className="flex items-center gap-3">
-            <label className="text-[12px] text-zinc-400">Pages</label>
+            <label className="w-12 shrink-0 text-[12px] text-zinc-400">Pages</label>
             <input
               type="range"
               min={1}
@@ -160,74 +158,45 @@ export default function NewRun({
               value={maxPages || 60}
               disabled={maxPages === 0}
               onChange={(e) => setMaxPages(Number(e.target.value))}
-              className="flex-1 accent-zinc-300 disabled:opacity-30"
+              className="flex-1 accent-zinc-200 disabled:opacity-30"
             />
-            <span className="w-20 text-right text-[12px] tabular-nums text-zinc-300">
-              {maxPages === 0 ? 'no limit' : maxPages}
+            <span className="w-16 text-right text-[12px] tabular-nums text-zinc-300">
+              {maxPages === 0 ? '∞' : maxPages}
             </span>
-            <button
-              onClick={() => setMaxPages(maxPages === 0 ? 5 : 0)}
-              className={cx(
-                'shrink-0 rounded-lg border px-2.5 py-1 text-[11px]',
-                maxPages === 0
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'
-              )}
-            >
+            <Chip active={maxPages === 0} onClick={() => setMaxPages(maxPages === 0 ? 5 : 0)}>
               crawl everything
-            </button>
+            </Chip>
           </div>
           {maxPages === 0 && (
             <p className="-mt-1 text-[11px] leading-snug text-zinc-500">
-              Every reachable same-origin route will be captured, probed and flow-tested. Large sites can take a while;
-              a 45-minute safety cap applies and Cancel keeps whatever finished.
+              Every reachable same-origin route will be captured. Large sites can take a while; a 45-minute safety cap
+              applies and Cancel keeps whatever finished.
             </p>
           )}
           <div className="flex flex-wrap gap-2">
             {viewports.map((v) => (
-              <button
+              <Chip
                 key={v.name}
+                active={!!enabledVps[v.name]}
                 onClick={() => setEnabledVps((p) => ({ ...p, [v.name]: !p[v.name] }))}
-                className={cx(
-                  'rounded-lg border px-3 py-1.5 text-[12px]',
-                  enabledVps[v.name]
-                    ? 'border-zinc-600 bg-zinc-800 text-zinc-100'
-                    : 'border-zinc-800 bg-zinc-950 text-zinc-500'
-                )}
               >
                 {v.name} · {v.width}×{v.height}
-              </button>
+              </Chip>
             ))}
           </div>
         </div>
       </Panel>
 
-      <Panel title="Brutality">
-        <div className="grid grid-cols-3 gap-2">
-          {BRUTALITY.map((b) => (
-            <button
-              key={b.id}
-              onClick={() => setBrutality(b.id)}
-              className={cx(
-                'rounded-lg border p-3 text-left',
-                brutality === b.id
-                  ? 'border-zinc-500 bg-zinc-800/70'
-                  : 'border-zinc-800 bg-zinc-950 hover:border-zinc-700'
-              )}
-            >
-              <div className="text-[13px] text-zinc-100">{b.label}</div>
-              <div className="mt-0.5 text-[11px] leading-snug text-zinc-500">{b.blurb}</div>
-            </button>
-          ))}
-        </div>
+      <Panel title="Brutality" className="animate-fade-up" bodyClassName="pt-3">
+        <Segmented value={brutality} onChange={setBrutality} options={BRUTALITY} />
       </Panel>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 animate-fade-up">
         <Toggle
           checked={probe}
           onChange={setProbe}
           label="Deep interaction probe"
-          hint="Hover, focus, keyboard and safe-click every control; test overlays, escape, focus traps and empty-form validation"
+          hint="Hover, focus, keyboard and safe-click every control; overlays, escape, focus traps and empty-form validation"
         />
         <Toggle
           checked={useMobbin}
@@ -367,16 +336,27 @@ assertText Check your inbox`}
         </p>
       </Panel>
 
-      <div className="flex items-center gap-3">
-        <Button variant="primary" onClick={start} disabled={!valid || busy}>
-          {busy ? 'Starting…' : 'Run audit'}
-        </Button>
-        {!valid && (
-          <span className="text-[12px] text-zinc-600">
-            Enter a URL or host — <code>localhost:5173</code>, <code>127.0.0.1:3000</code> and{' '}
-            <code>https://yourapp.com</code> all work.
-          </span>
-        )}
+      <div className="sticky bottom-0 z-20 -mx-6 mt-2 border-t border-zinc-800/80 bg-zinc-950/90 px-6 py-3.5 backdrop-blur-md">
+        <div className="flex items-center justify-between gap-4">
+          <div className="min-w-0 text-[12px] text-zinc-500">
+            {valid ? (
+              <span className="line-clamp-1">
+                Ready to audit <span className="text-zinc-300">{normalized ?? url}</span>
+                {' · '}
+                <span className="text-zinc-400">{brutality}</span>
+                {authOpen && (password || matchedCred) ? ' · signed in' : ''}
+              </span>
+            ) : (
+              <span>
+                Enter a URL or host — <code className="text-zinc-400">localhost:5173</code>,{' '}
+                <code className="text-zinc-400">https://yourapp.com</code>
+              </span>
+            )}
+          </div>
+          <Button variant="primary" size="lg" onClick={start} disabled={!valid || busy}>
+            {busy ? 'Starting…' : 'Run audit'}
+          </Button>
+        </div>
       </div>
     </div>
   )
