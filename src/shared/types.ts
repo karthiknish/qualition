@@ -380,7 +380,7 @@ export interface RunProgress {
 
 /** In-app update state, mirrored to the renderer. */
 export interface UpdateStatus {
-  state: 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'error' | 'dismissed' | 'dev'
+  state: 'idle' | 'checking' | 'available' | 'downloading' | 'installing' | 'ready' | 'error' | 'dismissed' | 'dev'
   currentVersion: string
   version?: string
   percent?: number

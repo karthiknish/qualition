@@ -19,46 +19,59 @@ export default function UpdateBanner(): JSX.Element | null {
   if (!status) return null
   const { state, version, currentVersion, percent, canSelfInstall } = status
   if (state === 'idle' || state === 'checking' || state === 'dismissed' || state === 'dev') return null
-  if (state === 'error') return null
 
   const isReady = state === 'ready'
   const isDownloading = state === 'downloading'
+  const isInstalling = state === 'installing'
+  const isError = state === 'error'
+  const busyState = isDownloading || isInstalling
 
   return (
     <div className="fixed bottom-4 right-4 z-50 w-80 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
       <div className="flex items-start gap-3 p-3.5">
-        <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-emerald-500/15 text-[13px] text-emerald-300">
-          ↑
+        <span
+          className={cx(
+            'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[13px]',
+            isError ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
+          )}
+        >
+          {isError ? '!' : '↑'}
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-zinc-100">
-            {isReady ? 'Update ready to install' : isDownloading ? 'Downloading update…' : 'Update available'}
+            {isError
+              ? 'Update failed'
+              : isReady
+                ? 'Update ready to install'
+                : isInstalling
+                  ? 'Installing update…'
+                  : isDownloading
+                    ? 'Downloading update…'
+                    : 'Update available'}
           </p>
           <p className="mt-0.5 text-[11px] text-zinc-500">
-            Qualition {version ?? ''} · you have {currentVersion}
+            {isError ? status.error : `Qualition ${version ?? ''} · you have ${currentVersion}`}
           </p>
 
-          {isDownloading && typeof percent === 'number' && (
+          {busyState && typeof percent === 'number' && (
             <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
               <div className="h-full bg-emerald-500 transition-all" style={{ width: `${percent}%` }} />
             </div>
           )}
 
-          {status.releaseNotes && !isDownloading && (
+          {isInstalling && (
+            <p className="mt-1.5 text-[11px] text-zinc-400">Replacing the app — it will relaunch on its own.</p>
+          )}
+
+          {status.releaseNotes && !busyState && (
             <p className="mt-1.5 line-clamp-3 text-[11px] leading-snug text-zinc-400">
               {status.releaseNotes.replace(/<[^>]+>/g, '').slice(0, 180)}
             </p>
           )}
 
-          {!canSelfInstall && !isDownloading && (
-            <p className="mt-1.5 text-[10px] leading-snug text-zinc-600">
-              This build is unsigned, so it cannot replace itself — the download page will open instead.
-            </p>
-          )}
-
           <div className="mt-2.5 flex gap-2">
             <button
-              disabled={busy || isDownloading}
+              disabled={busy || busyState}
               onClick={async () => {
                 setBusy(true)
                 await api.installUpdate()
@@ -66,12 +79,12 @@ export default function UpdateBanner(): JSX.Element | null {
               }}
               className={cx(
                 'rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors',
-                isDownloading
+                busyState
                   ? 'cursor-not-allowed bg-zinc-800 text-zinc-500'
                   : 'bg-zinc-100 text-zinc-900 hover:bg-white'
               )}
             >
-              {isReady && canSelfInstall ? 'Restart & install' : canSelfInstall ? 'Install' : 'Download'}
+              {isError ? 'Retry' : isReady ? 'Restart & install' : 'Download & install'}
             </button>
             <button
               onClick={() => void api.dismissUpdate()}

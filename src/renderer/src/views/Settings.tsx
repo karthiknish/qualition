@@ -343,9 +343,9 @@ export default function SettingsView({
             <p className="mt-0.5 text-[11px] leading-snug text-zinc-500">{describeUpdate(update, checking)}</p>
           </div>
           <div className="flex shrink-0 gap-2">
-            {update?.state === 'ready' || update?.state === 'available' ? (
+            {update?.state === 'ready' || update?.state === 'available' || update?.state === 'error' ? (
               <Button variant="primary" onClick={() => void api.installUpdate()}>
-                {update.canSelfInstall ? (update.state === 'ready' ? 'Restart & install' : 'Install') : 'Download'}
+                {update.state === 'ready' ? 'Restart & install' : update.state === 'error' ? 'Retry install' : 'Download & install'}
               </Button>
             ) : null}
             <Button
@@ -365,7 +365,7 @@ export default function SettingsView({
         </div>
         <p className="mt-2 text-[10px] leading-snug text-zinc-600">
           Releases come from github.com/karthiknish/qualition. Updates are checked on launch and every 6 hours.
-          {update && update.canSelfInstall === false && ' This build is unsigned, so installing opens the download page.'}
+          {' Updates are downloaded, checksum-verified and installed in place — no browser needed.'}
         </p>
       </Panel>
 
@@ -407,6 +407,8 @@ function describeUpdate(u: UpdateStatus | null, checking: boolean): string {
       return `Version ${u.version} is available.`
     case 'downloading':
       return `Downloading ${u.version}… ${u.percent ?? 0}%`
+    case 'installing':
+      return `Installing ${u.version}… the app will relaunch itself.`
     case 'ready':
       return `Version ${u.version} downloaded and ready to install.`
     case 'error':
