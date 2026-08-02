@@ -74,6 +74,8 @@ const DEFAULT_SETTINGS: Settings = {
   cursorBinary: '',
   cursorApiKey: process.env.CURSOR_API_KEY ?? '',
   cursorModel: 'auto',
+  openrouterApiKey: process.env.OPENROUTER_API_KEY ?? '',
+  openrouterModel: 'google/gemini-2.5-flash',
   defaultBrutality: 'ruthless',
   maxPages: 5,
   interactionProbe: true,
@@ -93,7 +95,8 @@ export async function loadSettings(): Promise<Settings> {
       ...DEFAULT_SETTINGS,
       ...raw,
       geminiApiKey: raw.geminiApiKey || DEFAULT_SETTINGS.geminiApiKey,
-      openaiApiKey: raw.openaiApiKey || DEFAULT_SETTINGS.openaiApiKey
+      openaiApiKey: raw.openaiApiKey || DEFAULT_SETTINGS.openaiApiKey,
+      openrouterApiKey: raw.openrouterApiKey || DEFAULT_SETTINGS.openrouterApiKey
     }
   } catch {
     return DEFAULT_SETTINGS

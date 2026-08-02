@@ -16,7 +16,7 @@ import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { ProviderId, ProviderStatus } from '../../shared/types.js'
+import type { ModelInfo, ProviderId, ProviderStatus } from '../../shared/types.js'
 
 export interface ImageInput {
   path: string
@@ -36,9 +36,39 @@ export interface GenerateRequest {
 export interface Provider {
   id: ProviderId
   supportsVision: boolean
-  listModels(): Promise<string[]>
+  listModels(): Promise<ModelInfo[]>
   generate(model: string, req: GenerateRequest): Promise<string>
   status(model: string): Promise<ProviderStatus>
+}
+
+/**
+ * Published list prices, USD per 1M tokens, for providers with no pricing API.
+ * Marked `list` so the UI can say these are quoted prices rather than something
+ * fetched now — they will drift as vendors change them.
+ */
+const LIST_PRICES: Record<string, [number, number]> = {
+  'gemini-3.6-flash': [0.3, 2.5],
+  'gemini-3.5-flash': [0.3, 2.5],
+  'gemini-3-pro-preview': [1.25, 10],
+  'gemini-3.1-pro-preview': [1.25, 10],
+  'gemini-flash-latest': [0.3, 2.5],
+  'gemini-pro-latest': [1.25, 10],
+  'gemini-2.5-flash': [0.3, 2.5],
+  'gemini-2.5-flash-lite': [0.1, 0.4],
+  'gemini-2.5-pro': [1.25, 10],
+  'gemini-2.0-flash': [0.1, 0.4],
+  'gpt-5.2': [1.25, 10],
+  'gpt-5.1': [1.25, 10],
+  'gpt-5': [1.25, 10],
+  'gpt-5-mini': [0.25, 2],
+  'gpt-4.1': [2, 8],
+  'gpt-4.1-mini': [0.4, 1.6],
+  'o4-mini': [1.1, 4.4]
+}
+
+function withListPrice(id: string): ModelInfo {
+  const p = LIST_PRICES[id]
+  return p ? { id, promptPrice: p[0], completionPrice: p[1], priceSource: 'list' } : { id }
 }
 
 export interface ProviderCredentials {
@@ -47,6 +77,7 @@ export interface ProviderCredentials {
   openaiBaseUrl?: string
   cursorBinary?: string
   cursorApiKey?: string
+  openrouterApiKey?: string
 }
 
 /* ------------------------------ shared utils ------------------------------ */
@@ -178,19 +209,24 @@ class GeminiProvider implements Provider {
     return this.client
   }
 
-  async listModels(): Promise<string[]> {
+  async listModels(): Promise<ModelInfo[]> {
     const key = this.creds.geminiApiKey
-    if (!key) return GEMINI_FALLBACK_MODELS
+    if (!key) return GEMINI_FALLBACK_MODELS.map(withListPrice)
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}&pageSize=200`)
-      if (!res.ok) return GEMINI_FALLBACK_MODELS
-      const json = (await res.json()) as { models?: { name: string; supportedGenerationMethods?: string[] }[] }
+      if (!res.ok) return GEMINI_FALLBACK_MODELS.map(withListPrice)
+      const json = (await res.json()) as {
+        models?: { name: string; supportedGenerationMethods?: string[]; inputTokenLimit?: number }[]
+      }
+      const limits = new Map<string, number>()
+      for (const m of json.models ?? []) limits.set(m.name.replace(/^models\//, ''), m.inputTokenLimit ?? 0)
       const names = (json.models ?? [])
         .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
         .map((m) => m.name.replace(/^models\//, ''))
-      return names.length ? rankGeminiModels(names) : GEMINI_FALLBACK_MODELS
+      const ranked = names.length ? rankGeminiModels(names) : GEMINI_FALLBACK_MODELS
+      return ranked.map((id) => ({ ...withListPrice(id), contextTokens: limits.get(id) || undefined, vision: true }))
     } catch {
-      return GEMINI_FALLBACK_MODELS
+      return GEMINI_FALLBACK_MODELS.map(withListPrice)
     }
   }
 
@@ -265,16 +301,16 @@ class OpenAiProvider implements Provider {
     return { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` }
   }
 
-  async listModels(): Promise<string[]> {
-    if (!this.creds.openaiApiKey) return OPENAI_FALLBACK_MODELS
+  async listModels(): Promise<ModelInfo[]> {
+    if (!this.creds.openaiApiKey) return OPENAI_FALLBACK_MODELS.map(withListPrice)
     try {
       const res = await fetch(`${this.base()}/models`, { headers: this.headers() })
-      if (!res.ok) return OPENAI_FALLBACK_MODELS
+      if (!res.ok) return OPENAI_FALLBACK_MODELS.map(withListPrice)
       const json = (await res.json()) as { data?: { id: string }[] }
       const ranked = rankOpenAiModels((json.data ?? []).map((m) => m.id))
-      return ranked.length ? ranked : OPENAI_FALLBACK_MODELS
+      return (ranked.length ? ranked : OPENAI_FALLBACK_MODELS).map((id) => ({ ...withListPrice(id), vision: true }))
     } catch {
-      return OPENAI_FALLBACK_MODELS
+      return OPENAI_FALLBACK_MODELS.map(withListPrice)
     }
   }
 
@@ -370,17 +406,21 @@ class CursorProvider implements Provider {
       : { ...process.env }
   }
 
-  async listModels(): Promise<string[]> {
+  async listModels(): Promise<ModelInfo[]> {
     try {
       const out = await runCursor(cursorBinary(this.creds), ['--list-models'], '', this.env(), 30_000)
       const models = out
         .split('\n')
         .map((l) => l.trim())
         .filter((l) => /^[a-z0-9][\w.\-]*\s+-\s+/i.test(l))
-        .map((l) => l.split(/\s+-\s+/)[0])
-      return models.length ? models : CURSOR_FALLBACK_MODELS
+        .map((l) => {
+          const [id, label] = l.split(/\s+-\s+/)
+          return { id, label }
+        })
+      // Cursor bills by subscription, not per token — no per-model price exists.
+      return models.length ? models : CURSOR_FALLBACK_MODELS.map((id) => ({ id }))
     } catch {
-      return CURSOR_FALLBACK_MODELS
+      return CURSOR_FALLBACK_MODELS.map((id) => ({ id }))
     }
   }
 
@@ -442,12 +482,151 @@ class CursorProvider implements Provider {
 
 /* --------------------------------- factory -------------------------------- */
 
+/* ------------------------------- openrouter ------------------------------- */
+
+/**
+ * One key, most models, and the only provider here that publishes live pricing
+ * per model — so its costs are fetched rather than quoted from a table.
+ */
+class OpenRouterProvider implements Provider {
+  id: ProviderId = 'openrouter'
+  supportsVision = true
+
+  constructor(private creds: ProviderCredentials) {}
+
+  private headers(): Record<string, string> {
+    const key = this.creds.openrouterApiKey ?? ''
+    if (!key) throw new Error('No OpenRouter API key set (Settings → Models, or OPENROUTER_API_KEY).')
+    return {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${key}`,
+      // OpenRouter attributes traffic with these.
+      'HTTP-Referer': 'https://github.com/karthiknish/qualition',
+      'X-Title': 'Qualition'
+    }
+  }
+
+  async listModels(): Promise<ModelInfo[]> {
+    try {
+      const res = await fetch('https://openrouter.ai/api/v1/models')
+      if (!res.ok) return []
+      const json = (await res.json()) as {
+        data?: {
+          id: string
+          name?: string
+          context_length?: number
+          pricing?: { prompt?: string; completion?: string }
+          architecture?: { input_modalities?: string[] }
+        }[]
+      }
+      // Media, safety and retrieval models cannot critique a screenshot; they
+      // only make the picker harder to use.
+      const irrelevant =
+        /(tts|whisper|audio|speech|music|lyria|video|veo|sora|image-gen|dall|embed|rerank|moderation|guard|safety|content-safety)/i
+
+      // Ranked so the models people actually audit with surface first, rather
+      // than whatever happens to be free.
+      const VENDOR_RANK = ['anthropic/', 'openai/', 'google/', 'x-ai/', 'deepseek/', 'meta-llama/', 'mistralai/', 'qwen/']
+      const vendorRank = (id: string): number => {
+        const i = VENDOR_RANK.findIndex((v) => id.startsWith(v))
+        return i === -1 ? VENDOR_RANK.length : i
+      }
+
+      const models = (json.data ?? [])
+        .filter((m) => !m.id.startsWith('~') && !irrelevant.test(m.id))
+        .map((m) => {
+          // OpenRouter quotes USD per token; per 1M is the readable unit. It
+          // uses -1 for auto-routed models whose price depends on the pick.
+          const perM = (v: unknown): number | undefined => {
+            const n = Number(v ?? NaN) * 1_000_000
+            return Number.isFinite(n) && n >= 0 ? n : undefined
+          }
+          return {
+            id: m.id,
+            label: m.name,
+            promptPrice: perM(m.pricing?.prompt),
+            completionPrice: perM(m.pricing?.completion),
+            contextTokens: m.context_length,
+            vision: (m.architecture?.input_modalities ?? []).includes('image'),
+            priceSource: 'live' as const
+          }
+        })
+
+      return models.sort(
+        (a, b) =>
+          Number(b.vision) - Number(a.vision) ||
+          vendorRank(a.id) - vendorRank(b.id) ||
+          (a.promptPrice ?? 1e9) - (b.promptPrice ?? 1e9)
+      )
+    } catch {
+      return []
+    }
+  }
+
+  async generate(model: string, req: GenerateRequest): Promise<string> {
+    const content: any[] = [{ type: 'text', text: req.prompt }]
+    for (const img of req.images ?? []) {
+      const enc = await imageToBase64(img.path)
+      if (!enc) continue
+      if (img.caption) content.push({ type: 'text', text: img.caption })
+      content.push({ type: 'image_url', image_url: { url: `data:${enc.mime};base64,${enc.data}` } })
+    }
+
+    const body: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: req.system },
+        { role: 'user', content }
+      ],
+      temperature: req.temperature ?? 0.4,
+      ...(req.schema
+        ? {
+            response_format: {
+              type: 'json_schema',
+              json_schema: { name: 'qualition_findings', strict: false, schema: req.schema }
+            }
+          }
+        : {})
+    }
+
+    return withBackoff('openrouter', async () => {
+      const res = await withTimeout(
+        fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: this.headers(),
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        }),
+        REQUEST_TIMEOUT_MS,
+        'openrouter request'
+      )
+      const raw = await res.text()
+      if (!res.ok) throw new Error(`${res.status} ${raw.slice(0, 300)}`)
+      const json = JSON.parse(raw)
+      if (json.error) throw new Error(String(json.error.message ?? json.error).slice(0, 300))
+      return json.choices?.[0]?.message?.content ?? ''
+    })
+  }
+
+  async status(model: string): Promise<ProviderStatus> {
+    if (!this.creds.openrouterApiKey) return { id: 'openrouter', ok: false, detail: 'No API key set.', model }
+    try {
+      const out = await this.generate(model, { system: 'Reply with one word.', prompt: 'Say: ready' })
+      return { id: 'openrouter', ok: true, detail: `${model}: ${out.trim().slice(0, 30)}`, model }
+    } catch (e) {
+      return { id: 'openrouter', ok: false, detail: (e as Error).message.slice(0, 200), model }
+    }
+  }
+}
+
 export function createProvider(id: ProviderId, creds: ProviderCredentials): Provider {
   switch (id) {
     case 'openai':
       return new OpenAiProvider(creds)
     case 'cursor':
       return new CursorProvider(creds)
+    case 'openrouter':
+      return new OpenRouterProvider(creds)
     default:
       return new GeminiProvider(creds)
   }
@@ -459,12 +638,14 @@ export function credsFromSettings(s: {
   openaiBaseUrl?: string
   cursorBinary?: string
   cursorApiKey?: string
+  openrouterApiKey?: string
 }): ProviderCredentials {
   return {
     geminiApiKey: s.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
     openaiApiKey: s.openaiApiKey || process.env.OPENAI_API_KEY,
     openaiBaseUrl: s.openaiBaseUrl || process.env.OPENAI_BASE_URL,
     cursorBinary: s.cursorBinary,
-    cursorApiKey: s.cursorApiKey || process.env.CURSOR_API_KEY
+    cursorApiKey: s.cursorApiKey || process.env.CURSOR_API_KEY,
+    openrouterApiKey: s.openrouterApiKey || process.env.OPENROUTER_API_KEY
   }
 }

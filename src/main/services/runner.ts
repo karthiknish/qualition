@@ -147,7 +147,13 @@ export async function executeRun(
   const creds = credsFromSettings(settings)
   const critic = makeCritic(cfg, creds)
   const model = modelFor(settings)
-  const aiEnabled = cfg.useGemini && (cfg.provider === 'cursor' || !!(cfg.provider === 'openai' ? settings.openaiApiKey : settings.geminiApiKey))
+  const providerKey =
+    cfg.provider === 'openai'
+      ? settings.openaiApiKey
+      : cfg.provider === 'openrouter'
+        ? settings.openrouterApiKey
+        : settings.geminiApiKey
+  const aiEnabled = cfg.useGemini && (cfg.provider === 'cursor' || !!providerKey)
 
   try {
     progress('launch', 2, `Launching Chromium · target ${cfg.targetUrl}`)

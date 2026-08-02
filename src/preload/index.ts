@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   IntegrationStatus,
+  ModelInfo,
   ProviderId,
   ProviderStatus,
   SavedCredential,
@@ -15,7 +16,7 @@ import type {
 const api = {
   getSettings: (): Promise<Settings> => ipcRenderer.invoke('settings:get'),
   setSettings: (patch: Partial<Settings>): Promise<Settings> => ipcRenderer.invoke('settings:set', patch),
-  listModels: (provider: ProviderId): Promise<string[]> => ipcRenderer.invoke('models:list', provider),
+  listModels: (provider: ProviderId): Promise<ModelInfo[]> => ipcRenderer.invoke('models:list', provider),
   testModel: (provider: ProviderId): Promise<ProviderStatus> => ipcRenderer.invoke('models:test', provider),
   defaultViewports: (): Promise<Viewport[]> => ipcRenderer.invoke('viewports:default'),
   status: (): Promise<IntegrationStatus> => ipcRenderer.invoke('status:all'),

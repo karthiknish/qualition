@@ -119,7 +119,14 @@ function registerIpc(): void {
   })
   ipcMain.handle('models:test', async (_e, provider: ProviderId) => {
     const settings = await loadSettings()
-    const model = provider === 'openai' ? settings.openaiModel : provider === 'cursor' ? settings.cursorModel : settings.geminiModel
+    const model =
+      provider === 'openai'
+        ? settings.openaiModel
+        : provider === 'cursor'
+          ? settings.cursorModel
+          : provider === 'openrouter'
+            ? settings.openrouterModel
+            : settings.geminiModel
     return createProvider(provider, credsFromSettings(settings)).status(model)
   })
   ipcMain.handle('viewports:default', () => DEFAULT_VIEWPORTS)

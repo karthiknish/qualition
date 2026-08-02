@@ -270,7 +270,20 @@ export interface InteractionReport {
 
 /* -------------------------------- providers ------------------------------- */
 
-export type ProviderId = 'gemini' | 'openai' | 'cursor'
+export type ProviderId = 'gemini' | 'openai' | 'cursor' | 'openrouter'
+
+/** A selectable model, with cost when the provider publishes it. */
+export interface ModelInfo {
+  id: string
+  label?: string
+  /** USD per 1M tokens. */
+  promptPrice?: number
+  completionPrice?: number
+  contextTokens?: number
+  vision?: boolean
+  /** live = fetched from the provider now; list = published list price. */
+  priceSource?: 'live' | 'list'
+}
 
 export interface ProviderStatus {
   id: ProviderId
@@ -411,6 +424,8 @@ export interface Settings {
   cursorBinary: string
   cursorApiKey: string
   cursorModel: string
+  openrouterApiKey: string
+  openrouterModel: string
   defaultBrutality: RunConfig['brutality']
   maxPages: number
   interactionProbe: boolean
@@ -421,5 +436,14 @@ export interface Settings {
 }
 
 export function modelFor(s: Settings): string {
-  return s.provider === 'openai' ? s.openaiModel : s.provider === 'cursor' ? s.cursorModel : s.geminiModel
+  switch (s.provider) {
+    case 'openai':
+      return s.openaiModel
+    case 'cursor':
+      return s.cursorModel
+    case 'openrouter':
+      return s.openrouterModel
+    default:
+      return s.geminiModel
+  }
 }

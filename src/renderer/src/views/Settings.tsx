@@ -3,6 +3,7 @@ import type {
   IntegrationStatus,
   ProviderId,
   ProviderStatus,
+  ModelInfo,
   SavedCredential,
   Settings,
   UpdateStatus
@@ -13,6 +14,12 @@ import { Button, Input, Panel } from '../components/ui'
 const PROVIDERS: { id: ProviderId; label: string; blurb: string; vision: boolean }[] = [
   { id: 'gemini', label: 'Gemini', blurb: 'Google AI Studio key. Vision + JSON schema.', vision: true },
   { id: 'openai', label: 'OpenAI', blurb: 'Responses API. Vision + structured output. Any compatible base URL.', vision: true },
+  {
+    id: 'openrouter',
+    label: 'OpenRouter',
+    blurb: 'One key, 300+ models from every vendor. Live per-model pricing.',
+    vision: true
+  },
   {
     id: 'cursor',
     label: 'Cursor',
@@ -29,7 +36,7 @@ export default function SettingsView({
   onStatus: (s: IntegrationStatus) => void
 }): JSX.Element {
   const [s, setS] = useState<Settings | null>(null)
-  const [models, setModels] = useState<string[]>([])
+  const [models, setModels] = useState<ModelInfo[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
   const [servers, setServers] = useState<any[]>([])
   const [saving, setSaving] = useState(false)
@@ -73,9 +80,24 @@ export default function SettingsView({
     setSaving(false)
   }
 
-  const currentModel = s.provider === 'openai' ? s.openaiModel : s.provider === 'cursor' ? s.cursorModel : s.geminiModel
+  const currentModel =
+    s.provider === 'openai'
+      ? s.openaiModel
+      : s.provider === 'cursor'
+        ? s.cursorModel
+        : s.provider === 'openrouter'
+          ? s.openrouterModel
+          : s.geminiModel
   const setModel = (m: string): Promise<void> =>
-    save(s.provider === 'openai' ? { openaiModel: m } : s.provider === 'cursor' ? { cursorModel: m } : { geminiModel: m })
+    save(
+      s.provider === 'openai'
+        ? { openaiModel: m }
+        : s.provider === 'cursor'
+          ? { cursorModel: m }
+          : s.provider === 'openrouter'
+            ? { openrouterModel: m }
+            : { geminiModel: m }
+    )
 
   const testConnection = async (): Promise<void> => {
     setProbe(null)
@@ -139,6 +161,16 @@ export default function SettingsView({
               </Field>
             </>
           )}
+          {s.provider === 'openrouter' && (
+            <Field label="OpenRouter API key">
+              <Input
+                type="password"
+                value={s.openrouterApiKey}
+                onChange={(v) => setS({ ...s, openrouterApiKey: v })}
+                placeholder="sk-or-… (or OPENROUTER_API_KEY)"
+              />
+            </Field>
+          )}
           {s.provider === 'cursor' && (
             <>
               <Field label="cursor-agent binary (blank = ~/.local/bin/cursor-agent)">
@@ -165,20 +197,39 @@ export default function SettingsView({
               </span>
             }
           >
-            <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
+            <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
               {models.map((m) => (
                 <button
-                  key={m}
-                  onClick={() => setModel(m)}
+                  key={m.id}
+                  onClick={() => setModel(m.id)}
                   className={cx(
-                    'rounded-lg border px-2.5 py-1 text-[12px]',
-                    currentModel === m ? 'border-zinc-500 bg-zinc-800 text-zinc-100' : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                    'flex w-full items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left',
+                    currentModel === m.id
+                      ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
+                      : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
                   )}
                 >
-                  {m}
+                  <span className="min-w-0 flex-1 truncate text-[12px]">{m.id}</span>
+                  {m.vision === false && (
+                    <span className="shrink-0 rounded bg-amber-500/15 px-1 text-[9px] uppercase text-amber-300">
+                      no vision
+                    </span>
+                  )}
+                  {m.contextTokens ? (
+                    <span className="shrink-0 text-[10px] tabular-nums text-zinc-600">
+                      {Math.round(m.contextTokens / 1000)}k ctx
+                    </span>
+                  ) : null}
+                  <span className="shrink-0 text-[10px] tabular-nums text-zinc-500">{priceLabel(m)}</span>
                 </button>
               ))}
             </div>
+            {models.some((m) => m.priceSource === 'list') && (
+              <p className="mt-1 text-[10px] text-zinc-600">
+                Prices are USD per 1M tokens (in / out). Gemini and OpenAI figures are published list prices and may
+                drift; OpenRouter figures are fetched live.
+              </p>
+            )}
           </Field>
 
           <div className="flex items-center gap-2">
@@ -190,7 +241,8 @@ export default function SettingsView({
                   openaiApiKey: s.openaiApiKey,
                   openaiBaseUrl: s.openaiBaseUrl,
                   cursorBinary: s.cursorBinary,
-                  cursorApiKey: s.cursorApiKey
+                  cursorApiKey: s.cursorApiKey,
+                  openrouterApiKey: s.openrouterApiKey
                 })
                 await testConnection()
               }}
@@ -392,6 +444,14 @@ export default function SettingsView({
       </Panel>
     </div>
   )
+}
+
+/** USD per 1M tokens, in / out. Cursor bills by subscription, so it has none. */
+function priceLabel(m: ModelInfo): string {
+  if (m.promptPrice === undefined || m.completionPrice === undefined) return 'incl. in plan'
+  if (m.promptPrice === 0 && m.completionPrice === 0) return 'free'
+  const fmt = (n: number): string => (n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(3)}`)
+  return `${fmt(m.promptPrice)} / ${fmt(m.completionPrice)}`
 }
 
 /** Plain-language description of where the updater currently stands. */
