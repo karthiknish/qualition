@@ -20,6 +20,7 @@
 import type { Browser, Page } from 'playwright'
 import { join } from 'node:path'
 import { Deadline, limit, soft } from './deadline.js'
+import { hideDevChrome } from './devChrome.js'
 import type { Finding, InteractionReport, Severity, Viewport } from '../../shared/types.js'
 
 export { Deadline } from './deadline.js'
@@ -60,11 +61,63 @@ const collectControls = function (): any {
   const selector =
     'button, a[href], input, select, textarea, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=switch], [role=checkbox], [onclick], [data-testid*=button i]'
 
+  const isDevChrome = (el: Element | null): boolean => {
+    let cur: Element | null = el
+    while (cur && cur !== document.documentElement) {
+      if (
+        cur.hasAttribute('data-feedback-toolbar') ||
+        cur.hasAttribute('data-annotation-popup') ||
+        cur.hasAttribute('data-annotation-marker') ||
+        cur.hasAttribute('data-vercel-toolbar') ||
+        cur.hasAttribute('data-nextjs-toast') ||
+        cur.hasAttribute('data-nextjs-dialog') ||
+        cur.hasAttribute('data-react-scan') ||
+        cur.hasAttribute('data-stagewise') ||
+        cur.hasAttribute('data-q-dev-chrome')
+      )
+        return true
+      const id = (cur.id || '').toLowerCase()
+      if (id.includes('agentation') || id === 'react-scan-root' || id === '__stagewise_container') return true
+      const cls = typeof (cur as HTMLElement).className === 'string' ? (cur as HTMLElement).className.toLowerCase() : ''
+      if (cls.includes('agentation')) return true
+      if (cur.tagName.toLowerCase() === 'nextjs-portal') return true
+      cur = cur.parentElement
+    }
+    return false
+  }
+
   const visible = (el: Element): boolean => {
+    if (isDevChrome(el)) return false
+    // Prefer the browser's checkVisibility (what Playwright uses) when present.
+    // See Playwright actionability / Chromium Element.checkVisibility.
+    const anyEl = el as HTMLElement & { checkVisibility?: (o?: object) => boolean }
+    if (typeof anyEl.checkVisibility === 'function') {
+      try {
+        if (
+          !anyEl.checkVisibility({
+            checkOpacity: true,
+            checkVisibilityCSS: true,
+            contentVisibilityAuto: true
+          } as any)
+        )
+          return false
+      } catch {
+        /* fall through */
+      }
+    }
     const r = el.getBoundingClientRect()
     if (r.width < 2 || r.height < 2) return false
     const cs = getComputedStyle(el)
-    return cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) <= 0.05) return false
+    if (cs.pointerEvents === 'none') return false
+    // inert / aria-hidden ancestors are not in the a11y tree and should not be probed.
+    let cur: Element | null = el
+    while (cur) {
+      if ((cur as HTMLElement).inert) return false
+      if (cur.getAttribute('aria-hidden') === 'true') return false
+      cur = cur.parentElement
+    }
+    return true
   }
 
   const accName = (el: Element): string => {
@@ -85,6 +138,11 @@ const collectControls = function (): any {
       if (el.placeholder) return el.placeholder
       if (el.value && el.type === 'submit') return el.value
     }
+    // Icon-only buttons often expose name via nested <img alt> / <svg><title>.
+    const img = el.querySelector('img[alt]') as HTMLImageElement | null
+    if (img?.alt?.trim()) return img.alt.trim()
+    const svgTitle = el.querySelector('svg title')?.textContent?.trim()
+    if (svgTitle) return svgTitle
     const title = el.getAttribute('title')
     const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
     return text || title || ''
@@ -237,6 +295,32 @@ function styleChanged(a: any, b: any): boolean {
   return Object.keys(a).some((k) => String(a[k]) !== String(b[k]))
 }
 
+/** True when focused styles show a ring / outline / glow a keyboard user can see. */
+function hasFocusCue(resting: any, focused: any): boolean {
+  if (!focused) return false
+  if (styleChanged(resting, focused)) return true
+  // Some designs keep the same boxShadow string but grow outlineWidth via :focus-visible
+  // after a real Tab — catch non-none outlines explicitly.
+  if (focused.outline && String(focused.outline).trim()) return true
+  return false
+}
+
+/**
+ * Count tabbable controls the way Playwright/Chromium see them — used to gate
+ * the false "Nothing is reachable by keyboard" critical that fires when Tab
+ * leaves the page into browser chrome (playwright#39268) or headless focus is soft.
+ */
+async function countPlaywrightFocusables(page: Page): Promise<number> {
+  try {
+    const loc = page.locator(
+      'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+    )
+    return await loc.count()
+  } catch {
+    return 0
+  }
+}
+
 export interface ProbeOptions {
   outDir: string
   viewport: Viewport
@@ -282,6 +366,7 @@ export async function probeInteractions(
       undefined
     )
     await page.waitForTimeout(500)
+    await hideDevChrome(page)
     await soft(page.evaluate(collectControls), deadline.slice(5000), 're-collect', null)
   }
   const findings: Finding[] = []
@@ -326,6 +411,9 @@ export async function probeInteractions(
       undefined
     )
     await page.waitForTimeout(600)
+
+    const hiddenChrome = await hideDevChrome(page)
+    if (hiddenChrome > 0) opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) before interaction probe`)
 
     const inventory: any = await soft(page.evaluate(collectControls), deadline.slice(20_000), 'collectControls', {
       controls: [],
@@ -400,22 +488,32 @@ export async function probeInteractions(
           report.noHoverFeedback.push(label)
         }
 
-        // Focus indicator
-        await soft(
-          page.evaluate((s) => (document.querySelector(s) as HTMLElement)?.focus?.(), sel),
-          deadline.slice(2000),
-          'focus',
-          undefined
-        )
-        await page.waitForTimeout(100)
-        const focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus style', null)
-        const isFocused = await soft(
+        // Focus indicator — prefer locator.focus() (Playwright actionability path)
+        // then re-check after a synthetic Tab if programmatic focus showed no cue
+        // (:focus-visible often only applies after keyboard focus).
+        await soft(locator.focus({ timeout: deadline.slice(2000) }), deadline.slice(2500), 'focus', undefined)
+        await page.waitForTimeout(80)
+        let focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus style', null)
+        let isFocused = await soft(
           page.evaluate((s) => document.activeElement === document.querySelector(s), sel),
           deadline.slice(2000),
           'focus check',
           false
         )
-        if (isFocused && focused && !styleChanged(c.resting, focused)) {
+        if (isFocused && focused && !hasFocusCue(c.resting, focused)) {
+          // Retry with keyboard focus — many UIs only style :focus-visible.
+          await soft(page.keyboard.press('Shift+Tab'), deadline.slice(1500), 'shift-tab', undefined)
+          await soft(page.keyboard.press('Tab'), deadline.slice(1500), 'tab-refocus', undefined)
+          await page.waitForTimeout(80)
+          focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus-visible style', null)
+          isFocused = await soft(
+            page.evaluate((s) => document.activeElement === document.querySelector(s), sel),
+            deadline.slice(2000),
+            'focus-visible check',
+            false
+          )
+        }
+        if (isFocused && focused && !hasFocusCue(c.resting, focused)) {
           report.noFocusIndicator.push(label)
         }
       } catch {
@@ -567,44 +665,95 @@ export async function probeInteractions(
       if (deadline.remaining < 6000) throw new Error('no budget left for keyboard sweep')
       renavigations = 0
       await restore()
-      await soft(page.evaluate(() => (document.body as HTMLElement).focus()), 2000, 'body focus', undefined)
+      await hideDevChrome(page)
+      // Re-tag controls after restore so we can seed focus on a real control.
+      await soft(page.evaluate(collectControls), deadline.slice(8000), 're-collect for tab', null)
+
+      // Playwright#39268: Tab can escape into browser chrome; document.hasFocus()
+      // goes false and activeElement looks like <body>. Bring the page forward
+      // and seed focus on a known focusable before sweeping.
+      await soft(page.bringToFront(), 2000, 'bringToFront', undefined)
+      await soft(page.locator('body').click({ position: { x: 2, y: 2 }, timeout: 1500 }), 2000, 'activate page', undefined)
+
+      const pwFocusables = await countPlaywrightFocusables(page)
+      const seed = page
+        .locator(
+          'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+        .first()
+      if (pwFocusables > 0) {
+        await soft(seed.focus({ timeout: deadline.slice(2000) }), deadline.slice(2500), 'seed focus', undefined)
+      } else {
+        await soft(page.evaluate(() => (document.body as HTMLElement).focus()), 2000, 'body focus', undefined)
+      }
+
       const stops: string[] = []
+      let lostDocumentFocus = false
       for (let i = 0; i < 25; i++) {
         if (deadline.expired) break
         await soft(page.keyboard.press('Tab'), deadline.slice(1500), 'tab', undefined)
-        const el = await soft(page.evaluate(() => {
-          const a = document.activeElement as HTMLElement | null
-          if (!a || a === document.body) return null
-          const r = a.getBoundingClientRect()
-          const cs = getComputedStyle(a)
-          return {
-            tag: a.tagName.toLowerCase(),
-            name: (a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
-            offscreen: r.width === 0 || r.height === 0,
-            hidden: cs.visibility === 'hidden' || cs.display === 'none',
-            y: Math.round(r.top + window.scrollY)
-          }
-        }), deadline.slice(2000), 'tab stop', null)
+        const el = await soft(
+          page.evaluate(() => {
+            if (!document.hasFocus()) return { lostFocus: true as const }
+            const a = document.activeElement as HTMLElement | null
+            if (!a || a === document.body || a === document.documentElement) return null
+            const r = a.getBoundingClientRect()
+            const cs = getComputedStyle(a)
+            return {
+              lostFocus: false as const,
+              tag: a.tagName.toLowerCase(),
+              name: (a.getAttribute('aria-label') || a.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40),
+              offscreen: r.width === 0 || r.height === 0,
+              hidden: cs.visibility === 'hidden' || cs.display === 'none',
+              y: Math.round(r.top + window.scrollY)
+            }
+          }),
+          deadline.slice(2000),
+          'tab stop',
+          null
+        )
         if (!el) break
+        if ('lostFocus' in el && el.lostFocus) {
+          lostDocumentFocus = true
+          break
+        }
+        if (!('tag' in el) || !el.tag) break
         stops.push(`${el.tag}:${el.name}`)
         if (el.hidden) {
           findings.push(
-            mk(url, 'major', 'Keyboard focus lands on a hidden element',
+            mk(
+              url,
+              'major',
+              'Keyboard focus lands on a hidden element',
               `Tab stop ${i + 1} (${el.tag} "${el.name}") is not visible but still focusable — the focus ring disappears into nothing.`,
               'Remove hidden controls from the tab order with inert, display:none, or tabindex="-1".',
-              { viewport: opts.viewport.name, category: 'accessibility' })
+              { viewport: opts.viewport.name, category: 'accessibility' }
+            )
           )
           break
         }
       }
       report.keyboard.tabStops = stops.length
-      if (stops.length === 0) {
+      // Only emit the critical when Playwright itself sees no focusables AND Tab
+      // found none — otherwise a Tab-to-chrome / headless focus glitch is not a
+      // product bug (playwright#39268, Chromium headless focus quirks).
+      if (stops.length === 0 && pwFocusables === 0) {
         findings.push(
-          mk(url, 'critical', 'Nothing is reachable by keyboard',
-            'Pressing Tab from the top of the document never lands on a focusable control.',
+          mk(
+            url,
+            'critical',
+            'Nothing is reachable by keyboard',
+            'Pressing Tab from the top of the document never lands on a focusable control, and Playwright found no tabbable elements in the DOM.',
             'This page is unusable without a mouse — check for tabindex="-1" on wrappers or a focus-stealing overlay.',
-            { viewport: opts.viewport.name, category: 'accessibility' })
+            { viewport: opts.viewport.name, category: 'accessibility' }
+          )
         )
+      } else if (stops.length === 0 && pwFocusables > 0) {
+        opts.onLog?.(
+          `keyboard sweep found 0 tab stops but ${pwFocusables} Playwright focusable(s)${lostDocumentFocus ? ' (document lost focus — likely Tab escaped to chrome)' : ''} — skipping false critical on ${url}`
+        )
+        // Still record inventory so reachableRatio stays honest.
+        report.keyboard.tabStops = Math.min(pwFocusables, 25)
       }
     } catch {
       /* navigation raced */

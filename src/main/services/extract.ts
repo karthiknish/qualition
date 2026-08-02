@@ -33,11 +33,60 @@ export const extractFn = function (): any {
     return out
   }
 
+  const isDevChrome = (el: Element | null): boolean => {
+    let cur: Element | null = el
+    while (cur && cur !== document.documentElement) {
+      if (
+        cur.hasAttribute('data-feedback-toolbar') ||
+        cur.hasAttribute('data-annotation-popup') ||
+        cur.hasAttribute('data-annotation-marker') ||
+        cur.hasAttribute('data-vercel-toolbar') ||
+        cur.hasAttribute('data-nextjs-toast') ||
+        cur.hasAttribute('data-nextjs-dialog') ||
+        cur.hasAttribute('data-react-scan') ||
+        cur.hasAttribute('data-stagewise') ||
+        cur.hasAttribute('data-q-dev-chrome')
+      )
+        return true
+      const id = (cur.id || '').toLowerCase()
+      if (id.includes('agentation') || id === 'react-scan-root' || id === '__stagewise_container') return true
+      const cls = typeof (cur as HTMLElement).className === 'string' ? (cur as HTMLElement).className.toLowerCase() : ''
+      if (cls.includes('agentation')) return true
+      if (cur.tagName.toLowerCase() === 'nextjs-portal') return true
+      cur = cur.parentElement
+    }
+    return false
+  }
+
   const isVisible = (el: Element): boolean => {
+    if (isDevChrome(el)) return false
+    const anyEl = el as HTMLElement & { checkVisibility?: (o?: object) => boolean }
+    if (typeof anyEl.checkVisibility === 'function') {
+      try {
+        if (
+          !anyEl.checkVisibility({
+            checkOpacity: true,
+            checkVisibilityCSS: true,
+            contentVisibilityAuto: true
+          } as any)
+        )
+          return false
+      } catch {
+        /* fall through to geometric check */
+      }
+    }
     const r = el.getBoundingClientRect()
     if (r.width < 2 || r.height < 2) return false
     const cs = getComputedStyle(el)
-    return cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
+    if (cs.display === 'none' || cs.visibility === 'hidden' || Number(cs.opacity) <= 0.05) return false
+    if (cs.pointerEvents === 'none') return false
+    let cur: Element | null = el
+    while (cur) {
+      if ((cur as HTMLElement).inert) return false
+      if (cur.getAttribute('aria-hidden') === 'true') return false
+      cur = cur.parentElement
+    }
+    return true
   }
 
   // Design-system shells (Astryx et al.) wrap the tree in `display: contents`
@@ -509,7 +558,21 @@ export const extractFn = function (): any {
       if (boxes[i].el.contains(boxes[j].el) || boxes[j].el.contains(boxes[i].el)) continue
       const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left)
       const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)
-      if (ox > 4 && oy > 4) overlaps++
+      if (ox <= 4 || oy <= 4) continue
+      // BBox overlap alone is noisy (stacked cards, absolute badges). Confirm with
+      // hit-testing the way Playwright actionability does — centre of A must
+      // actually land on B (or vice versa) for a real tap collision.
+      const ax = a.left + a.width / 2
+      const ay = a.top + a.height / 2
+      const bx = b.left + b.width / 2
+      const by = b.top + b.height / 2
+      const hitA = document.elementFromPoint(ax, ay)
+      const hitB = document.elementFromPoint(bx, by)
+      const aHitsB =
+        !!hitA && (hitA === boxes[j].el || boxes[j].el.contains(hitA)) && !boxes[i].el.contains(hitA)
+      const bHitsA =
+        !!hitB && (hitB === boxes[i].el || boxes[i].el.contains(hitB)) && !boxes[j].el.contains(hitB)
+      if (aHitsB || bHitsA) overlaps++
     }
   }
 

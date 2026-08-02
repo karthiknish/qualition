@@ -207,6 +207,15 @@ test('auditCss reports z-index sprawl and !important abuse', () => {
   assert.ok(findings.some((f) => /Locations:/.test(f.detail)), 'css-tree locations should be cited')
 })
 
+test('DEV_CHROME_SELECTORS cover Agentation toolbar markers', async () => {
+  const { DEV_CHROME_ATTRS, DEV_CHROME_SELECTORS } = await import('../src/main/services/devChrome.js')
+  assert.ok(DEV_CHROME_ATTRS.includes('data-feedback-toolbar'))
+  assert.ok(DEV_CHROME_ATTRS.includes('data-annotation-popup'))
+  assert.ok(DEV_CHROME_ATTRS.includes('data-annotation-marker'))
+  assert.match(DEV_CHROME_SELECTORS, /agentation/i)
+  assert.match(DEV_CHROME_SELECTORS, /data-feedback-toolbar/)
+})
+
 test('classifyCssSheet separates CDN, framework and app CSS', async () => {
   const { classifyCssSheet, partitionCssSheets, isFrameworkTokenName } = await import('../src/main/services/cssScope.js')
   assert.equal(

@@ -10,6 +10,7 @@ import { extractFn, observerInit } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
 import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
+import { hideDevChrome } from './devChrome.js'
 import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
 import type {
   AxeViolation,
@@ -73,6 +74,9 @@ export const DEFAULT_VIEWPORTS: Viewport[] = [
 ]
 
 export async function launch(): Promise<Browser> {
+  // Headless Chromium can soft-lose document focus so Tab sweeps report zero
+  // stops (playwright#39268). Interaction probes call bringToFront() + seed
+  // focus on a real control before Tabing; keep launch minimal.
   return chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] })
 }
 
@@ -210,6 +214,10 @@ export async function capturePage(
       await page.waitForTimeout(700)
       await page.evaluate(() => window.scrollTo(0, 0))
       await page.waitForTimeout(400)
+
+      // Hide Agentation / Vercel toolbar / similar before we screenshot or walk the DOM.
+      const hiddenChrome = await hideDevChrome(page)
+      if (hiddenChrome > 0) opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) (Agentation etc.) on ${url}`)
 
       const shot = join(opts.outDir, `${slug}-${vp.name}.png`)
       await page.screenshot({ path: shot, fullPage: true, animations: 'disabled' })
