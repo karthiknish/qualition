@@ -16,6 +16,7 @@ import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { describeApiError, describeThrownError } from './apiError.js'
 import type { ModelInfo, ProviderId, ProviderStatus } from '../../shared/types.js'
 
 export interface ImageInput {
@@ -254,7 +255,9 @@ class GeminiProvider implements Provider {
         }),
         REQUEST_TIMEOUT_MS,
         'gemini request'
-      )
+      ).catch((e) => {
+        throw new Error(describeThrownError('Gemini', e))
+      })
     )
     return res.text ?? ''
   }
@@ -265,7 +268,7 @@ class GeminiProvider implements Provider {
       const out = await this.generate(model, { system: 'Reply with one word.', prompt: 'Say: ready' })
       return { id: 'gemini', ok: true, detail: `${model}: ${out.trim().slice(0, 30)}`, model }
     } catch (e) {
-      return { id: 'gemini', ok: false, detail: (e as Error).message.slice(0, 200), model }
+      return { id: 'gemini', ok: false, detail: describeThrownError('Gemini', e), model }
     }
   }
 }
@@ -373,8 +376,9 @@ class OpenAiProvider implements Provider {
         'openai request'
       )
       const raw = await res.text()
-      if (!res.ok) throw new Error(`${res.status} ${raw.slice(0, 300)}`)
+      if (!res.ok) throw new Error(describeApiError('OpenAI', res.status, raw))
       const json = JSON.parse(raw)
+      if (json.error) throw new Error(describeApiError('OpenAI', res.status, raw))
       if (typeof json.output_text === 'string' && json.output_text) return json.output_text
       const chunks: string[] = []
       for (const item of json.output ?? []) {
@@ -391,7 +395,7 @@ class OpenAiProvider implements Provider {
       const out = await this.generate(model, { system: 'Reply with one word.', prompt: 'Say: ready' })
       return { id: 'openai', ok: true, detail: `${model}: ${out.trim().slice(0, 30)}`, model }
     } catch (e) {
-      return { id: 'openai', ok: false, detail: (e as Error).message.slice(0, 200), model }
+      return { id: 'openai', ok: false, detail: describeThrownError('OpenAI', e), model }
     }
   }
 }
@@ -627,9 +631,9 @@ class OpenRouterProvider implements Provider {
         'openrouter request'
       )
       const raw = await res.text()
-      if (!res.ok) throw new Error(`${res.status} ${raw.slice(0, 300)}`)
+      if (!res.ok) throw new Error(describeApiError('OpenRouter', res.status, raw))
       const json = JSON.parse(raw)
-      if (json.error) throw new Error(String(json.error.message ?? json.error).slice(0, 300))
+      if (json.error) throw new Error(describeApiError('OpenRouter', res.status, raw))
       return json.choices?.[0]?.message?.content ?? ''
     })
   }
@@ -640,7 +644,7 @@ class OpenRouterProvider implements Provider {
       const out = await this.generate(model, { system: 'Reply with one word.', prompt: 'Say: ready' })
       return { id: 'openrouter', ok: true, detail: `${model}: ${out.trim().slice(0, 30)}`, model }
     } catch (e) {
-      return { id: 'openrouter', ok: false, detail: (e as Error).message.slice(0, 200), model }
+      return { id: 'openrouter', ok: false, detail: describeThrownError('OpenRouter', e), model }
     }
   }
 }

@@ -6,6 +6,7 @@
  * or as an SSE stream (`event: message\ndata: {...}`); both are handled.
  */
 import { getBearerFor } from './credentials.js'
+import { describeApiError, describeRpcError } from './apiError.js'
 
 export interface McpContent {
   type: string
@@ -83,10 +84,26 @@ export class McpHttpClient {
     if (res.status === 202) return null
     const text = await res.text()
     if (!res.ok) {
-      throw new Error(`MCP ${method} failed (${res.status}): ${text.slice(0, 300)}`)
+      const server = (() => {
+        try {
+          return new URL(this.url).hostname
+        } catch {
+          return 'MCP server'
+        }
+      })()
+      throw new Error(describeApiError(server, res.status, text))
     }
     const parsed = parseBody(text, res.headers.get('content-type') ?? '')
-    if (parsed?.error) throw new Error(`MCP ${method} error: ${JSON.stringify(parsed.error).slice(0, 300)}`)
+    if (parsed?.error) {
+      const server = (() => {
+        try {
+          return new URL(this.url).hostname
+        } catch {
+          return 'MCP server'
+        }
+      })()
+      throw new Error(describeRpcError(server, method, parsed.error))
+    }
     return parsed?.result ?? null
   }
 

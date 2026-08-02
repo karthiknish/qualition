@@ -18,6 +18,7 @@ import { flowInventory, heuristicFlows, validateFlow } from '../src/main/service
 import { sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
+import { describeApiError, describeRpcError } from '../src/main/services/apiError.js'
 import {
   extractJson,
   rankGeminiModels,
@@ -818,6 +819,40 @@ test('openai ranking treats o-series as its own line, not version 99', () => {
   assert.ok(ranked.indexOf('o4-mini') < ranked.indexOf('o1'), 'o4 must outrank o1')
   assert.ok(!ranked.includes('gpt-5-2025-01-31'), 'dated snapshots duplicate their alias')
   assert.ok(!ranked.some((m) => /audio/.test(m)), 'non-text models must be dropped')
+})
+
+test('api failures read as sentences, never raw JSON envelopes', () => {
+  // The exact shapes providers return on the common failures.
+  const badKey = describeApiError(
+    'OpenAI',
+    401,
+    '{"error":{"message":"Incorrect API key provided: sk-abc.","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}'
+  )
+  assert.match(badKey, /Incorrect API key provided/)
+  assert.ok(!badKey.includes('{'), `must not leak JSON: ${badKey}`)
+  assert.ok(!badKey.includes('invalid_request_error'), 'internal error codes are noise')
+
+  const rateLimited = describeApiError('OpenRouter', 429, '{"error":{"message":"Rate limit exceeded"}}')
+  assert.match(rateLimited, /Rate limit exceeded/)
+  assert.match(rateLimited, /wait|switch|quota/i, 'should say what to do about it')
+
+  // No credit / model gone still produce guidance with no JSON.
+  for (const [status, body] of [[402, '{}'], [404, '{}'], [503, '']] as [number, string][]) {
+    const msg = describeApiError('OpenRouter', status, body)
+    assert.ok(msg.length > 10 && !msg.includes('{'), `status ${status} produced: ${msg}`)
+  }
+
+  // HTML from a proxy must be stripped, not dumped.
+  const html = describeApiError('OpenAI', 502, '<html><body><h1>502 Bad Gateway</h1></body></html>')
+  assert.ok(!html.includes('<'), `HTML leaked: ${html}`)
+
+  // Unparseable bodies still yield something actionable.
+  assert.match(describeApiError('Gemini', 400, 'not json at all'), /not json at all|rejected/i)
+
+  // JSON-RPC errors from MCP servers.
+  const rpc = describeRpcError('api.mobbin.com', 'tools/call', { code: -32000, message: 'Session expired' })
+  assert.match(rpc, /Session expired/)
+  assert.ok(!rpc.includes('{'), `must not leak JSON: ${rpc}`)
 })
 
 test('extractJson survives fenced and chatty model output', () => {
