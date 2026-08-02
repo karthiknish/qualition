@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CapturedPage, Finding, Run, RunProgress, Severity } from '../../../shared/types'
 import { api, CATEGORY_LABEL, cx, gradeColor, SEVERITY_COLOR } from '../lib/api'
 import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
@@ -114,7 +114,7 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
         </div>
       )}
 
-      <nav className="sticky top-0 z-[5] -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
+      <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
         <div className="flex gap-0.5 overflow-x-auto">
           {TABS.map((t) => (
             <button
@@ -204,10 +204,45 @@ const PROMPT_SCOPES: { id: 'all' | 'critical' | 'accessibility' | 'coherence'; l
 /**
  * Copies a paste-ready brief for an AI coding chat: measured evidence, required
  * fixes, component swaps and explicit "do not redesign the rest" constraints.
+ *
+ * Menu is `position: fixed` (not absolute) so sticky Report tabs — which create
+ * a higher stacking context — cannot paint over it.
  */
 function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: string; sectionId?: string; label?: string }): JSX.Element {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState<string | null>(null)
+  const triggerRef = useRef<HTMLDivElement | null>(null)
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null)
+
+  const placeMenu = (): void => {
+    const el = triggerRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    setMenuPos({
+      top: Math.round(r.bottom + 6),
+      right: Math.round(window.innerWidth - r.right)
+    })
+  }
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPos(null)
+      return
+    }
+    placeMenu()
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const onReposition = (): void => placeMenu()
+    window.addEventListener('resize', onReposition)
+    // Report scrolls inside <main>, not window — capture phase catches it.
+    window.addEventListener('scroll', onReposition, true)
+    return () => {
+      window.removeEventListener('resize', onReposition)
+      window.removeEventListener('scroll', onReposition, true)
+    }
+  }, [open])
 
   const copy = async (scope: 'all' | 'critical' | 'accessibility' | 'coherence' | 'section'): Promise<void> => {
     const text = await api.buildPrompt(runId, { scope, sectionId })
@@ -231,17 +266,22 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
   }
 
   return (
-    <div className="relative">
+    <div ref={triggerRef} className="relative">
       <Button size="sm" variant="primary" onClick={() => setOpen(!open)}>
         {copied ?? label}
       </Button>
-      {open && (
+      {open && menuPos && (
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-50 mt-1 w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50">
+          <div className="fixed inset-0 z-[80]" onClick={() => setOpen(false)} />
+          <div
+            role="menu"
+            className="fixed z-[90] w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60"
+            style={{ top: menuPos.top, right: menuPos.right }}
+          >
             {PROMPT_SCOPES.map((s) => (
               <button
                 key={s.id}
+                role="menuitem"
                 onClick={() => copy(s.id)}
                 className="block w-full px-3 py-2 text-left hover:bg-zinc-800"
               >
