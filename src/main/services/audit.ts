@@ -459,15 +459,25 @@ function longestRun(arr: string[]): { role: string; count: number } {
 
 /* ------------------------------- scorecard -------------------------------- */
 
+/**
+ * Penalty a category can absorb before it reads as zero.
+ *
+ * These were tuned when a run produced ~20 findings. With the interaction probe,
+ * authored-CSS analysis and a per-section AI critique all contributing, a real
+ * product now produces 200+, which pinned seven of eight categories at exactly
+ * 0 — the same score for "needs work" and "catastrophic". Budgets are larger,
+ * and the curve below is sub-linear so the scale keeps resolving differences at
+ * the bad end instead of saturating.
+ */
 const CATEGORY_BUDGET: Record<Category, number> = {
-  coherence: 55,
-  variety: 30,
-  accessibility: 70,
-  responsive: 45,
-  flow: 60,
-  performance: 45,
-  content: 25,
-  craft: 30
+  coherence: 180,
+  variety: 90,
+  accessibility: 220,
+  responsive: 130,
+  flow: 170,
+  performance: 120,
+  content: 80,
+  craft: 110
 }
 
 export function scoreRun(findings: Finding[], pageCount: number, brutality: RunConfig['brutality']): Scorecard {
@@ -478,8 +488,11 @@ export function scoreRun(findings: Finding[], pageCount: number, brutality: RunC
   for (const c of cats) {
     const list = findings.filter((f) => f.category === c)
     const penalty = list.reduce((s, f) => s + SEVERITY_WEIGHT[f.severity], 0) * multiplier
-    const budget = CATEGORY_BUDGET[c] * Math.max(1, pageCount * 0.7)
-    const score = Math.max(0, Math.round(100 - (penalty / budget) * 100))
+    const budget = CATEGORY_BUDGET[c] * Math.max(1, pageCount * 0.5)
+    // Sub-linear: the first problems cost the most, and a very bad page still
+    // scores above a hopeless one instead of both showing 0.
+    const ratio = penalty / budget
+    const score = Math.max(2, Math.round(100 * Math.exp(-ratio)))
     categories[c] = { score, findings: list.length }
   }
 
@@ -489,7 +502,11 @@ export function scoreRun(findings: Finding[], pageCount: number, brutality: RunC
   }
   let overall = 0
   for (const c of cats) overall += categories[c].score * weights[c]
-  overall = Math.round(overall)
+  // A weighted average lets seven healthy categories hide one broken one, which
+  // is how a product with zero keyboard access scored a B. You cannot be good
+  // overall while a category is on the floor, so the worst category caps it.
+  const worstScore = Math.min(...cats.map((c) => categories[c].score))
+  overall = Math.round(Math.min(overall, worstScore + 25))
 
   const blockers = findings.filter((f) => f.severity === 'blocker').length
   if (blockers) overall = Math.min(overall, 45)

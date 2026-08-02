@@ -154,9 +154,10 @@ test('scoring is monotonic and blockers cap the grade', () => {
 })
 
 test('brutality changes the penalty, not the findings', () => {
-  const findings = [
-    { id: '1', category: 'coherence' as const, severity: 'major' as const, title: 't', detail: 'd', fix: 'f', pageUrl: 'u', source: 'heuristic' as const }
-  ]
+  const findings: Finding[] = Array.from({ length: 25 }, (_, i) => ({
+    id: `b${i}`, category: 'coherence', severity: 'major', title: `t${i}`,
+    detail: 'd', fix: 'f', pageUrl: 'u', source: 'heuristic'
+  }))
   const fair = scoreRun(findings, 1, 'fair').overall
   const ruthless = scoreRun(findings, 1, 'ruthless').overall
   assert.ok(ruthless < fair, `ruthless (${ruthless}) must score below fair (${fair})`)

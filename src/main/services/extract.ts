@@ -228,6 +228,24 @@ export const extractFn = function (): any {
     const blocks = Array.from(best.children).filter((c) => isVisible(c) && hasSubstance(c))
     if (blocks.length >= 2) {
       for (const b of blocks) candidates.push(b)
+    } else if (best.querySelectorAll('h1,h2,h3,[role=heading]').length >= 2) {
+      // One container holding the whole screen is not a section. Slice it at
+      // heading boundaries so each labelled area becomes its own section -
+      // otherwise every page reports a single 's1' and the per-section
+      // references, component picks and critique all collapse onto it.
+      const heads = Array.from(best.querySelectorAll('h1,h2,h3,[role=heading]')).filter(isVisible)
+      const blocks = new Set<Element>()
+      for (const h of heads) {
+        let block: Element | null = h
+        // Climb to the block that owns this heading but not the whole screen.
+        while (block?.parentElement && block.parentElement !== best && block.parentElement.children.length < 2) {
+          block = block.parentElement
+        }
+        while (block && block.parentElement && block.parentElement !== best) block = block.parentElement
+        if (block && isVisible(block) && hasSubstance(block)) blocks.add(block)
+      }
+      if (blocks.size >= 2) for (const b of blocks) candidates.push(b)
+      else candidates.push(best)
     } else {
       candidates.push(best)
       // Also surface obvious app landmarks so a shell is not one blob.
