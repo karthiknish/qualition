@@ -25,7 +25,14 @@ import {
   rankOpenAiModels,
   GEMINI_FALLBACK_MODELS
 } from '../src/main/services/providers.js'
-import { modelFor, type CapturedPage, type RunConfig, type Settings } from '../src/shared/types.js'
+import { modelFor, type CapturedPage, type Finding, type Run, type RunConfig, type Settings } from '../src/shared/types.js'
+import {
+  buildFixPrompt,
+  dedupeFindingsForPrompt,
+  pathnameOf,
+  stableSelector,
+  trimEvidence
+} from '../src/main/services/prompt.js'
 
 const config: RunConfig = {
   targetUrl: 'https://example.com',
@@ -198,6 +205,112 @@ test('auditCss reports z-index sprawl and !important abuse', () => {
   assert.ok(findings.some((f) => /z-index sprawl/.test(f.title)))
   assert.ok(findings.some((f) => /!important/.test(f.title)))
   assert.ok(findings.some((f) => /Locations:/.test(f.detail)), 'css-tree locations should be cited')
+})
+
+test('classifyCssSheet separates CDN, framework and app CSS', async () => {
+  const { classifyCssSheet, partitionCssSheets, isFrameworkTokenName } = await import('../src/main/services/cssScope.js')
+  assert.equal(
+    classifyCssSheet(
+      { href: 'https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css', text: '.btn{}' },
+      'http://localhost:5181/'
+    ).scope,
+    'vendor'
+  )
+  assert.equal(
+    classifyCssSheet(
+      { href: 'http://localhost:5181/node_modules/tailwindcss/index.css', text: '.x{}' },
+      'http://localhost:5181/'
+    ).scope,
+    'framework'
+  )
+  assert.equal(
+    classifyCssSheet(
+      {
+        href: null,
+        text: '/*! tailwindcss v3 */ @tailwind base; :root { --tw-shadow: 0 1px 2px }'.repeat(3)
+      },
+      'http://localhost:5181/'
+    ).scope,
+    'framework'
+  )
+  assert.equal(
+    classifyCssSheet(
+      { href: 'http://localhost:5181/assets/app.css', text: ':root { --color-brand: #111 } .card { color: var(--color-brand) }' },
+      'http://localhost:5181/'
+    ).scope,
+    'app'
+  )
+
+  const part = partitionCssSheets(
+    [
+      {
+        href: 'http://localhost:5181/assets/app.css',
+        text: ':root{--color-brand:#5433fd;--color-text:#111}.card{color:var(--color-brand)}.a{color:var(--color-brand)!important;padding:8px}'
+      },
+      {
+        href: 'https://unpkg.com/normalize.css',
+        text: '/*! normalize.css */ html{line-height:1.15} body{margin:0}' + 'a{color:red}'.repeat(20)
+      }
+    ],
+    'http://localhost:5181/'
+  )
+  assert.equal(part.scoped, true)
+  assert.ok(part.bytes.app > 0)
+  assert.ok(part.bytes.vendor > 0)
+  assert.ok(part.analysis.includes('--color-brand'))
+  assert.ok(!part.analysis.includes('normalize.css'))
+
+  assert.equal(isFrameworkTokenName('tw-shadow'), true)
+  assert.equal(isFrameworkTokenName('color-brand'), false)
+})
+
+test('extractTokenTree skips framework custom properties', async () => {
+  const { extractTokenTree } = await import('../src/main/services/tokens.js')
+  const { flat, frameworkCount } = extractTokenTree(`
+    :root {
+      --color-brand: #5433fd;
+      --tw-shadow: 0 1px 2px;
+      --tw-ring-offset-shadow: 0 0 #0000;
+      --space-sm: 8px;
+    }
+  `)
+  assert.ok(flat.some((t) => t.name === 'color-brand'))
+  assert.ok(flat.some((t) => t.name === 'space-sm'))
+  assert.ok(!flat.some((t) => t.name.startsWith('tw-')))
+  assert.ok(frameworkCount >= 2)
+})
+
+test('analyzeCss attribution and auditCss avoid low-threshold authored size noise', () => {
+  const css = `
+    :root { --brand: #5433fd }
+    .a { color: var(--brand); border-radius: 6px; font-size: 14px }
+    .b { color: red !important; z-index: 9999; font-size: 15px; border-radius: 7px }
+  `
+  const stats = analyzeCss(css, 1, {
+    attribution: {
+      scoped: true,
+      appBytes: css.length,
+      frameworkBytes: 900_000,
+      vendorBytes: 100_000,
+      totalBytes: css.length + 1_000_000,
+      appSheets: 1,
+      frameworkSheets: 2,
+      vendorSheets: 1,
+      missedExternals: 1,
+      truncated: false,
+      styleAttrCount: 0,
+      adoptedSheetCount: 0
+    }
+  })
+  assert.ok(stats)
+  assert.equal(stats!.attribution?.scoped, true)
+  assert.ok(stats!.bytes >= 1_000_000)
+  const findings = auditCss(page(), stats!, { ...config, brutality: 'ruthless' })
+  assert.ok(findings.some((f) => /kB of CSS/.test(f.title)))
+  assert.ok(findings.some((f) => /first-party/i.test(f.detail)))
+  assert.ok(findings.some((f) => /incomplete/i.test(f.title)))
+  // 2 font sizes should NOT fire authored finding (threshold raised to 18)
+  assert.ok(!findings.some((f) => /unique font sizes in the stylesheet/.test(f.title)))
 })
 
 /* --------------------------- css-tree + tokens ---------------------------- */
@@ -937,4 +1050,235 @@ test('registry search ranks exact names first and builds valid add commands', ()
   assert.equal(hits[0].name, 'accordion')
   assert.equal(addCommand(hits[0] as never), 'npx shadcn@latest add accordion')
   assert.equal(addCommand(items[2] as never), 'npx shadcn@latest add @acme/login-01')
+})
+
+test('queriesForSection prefers product UI vocabulary over generic section/card', async () => {
+  const { queriesForSection } = await import('../src/main/services/shoogle.js')
+  const q = queriesForSection(
+    'content',
+    { label: 'Settings', headings: ['Personal', 'Workspace'], textPreview: 'Account settings sidebar' },
+    ['The section has no visible page hierarchy']
+  )
+  assert.ok(q.some((x) => /settings/i.test(x)), `expected settings query, got ${q.join(', ')}`)
+  assert.ok(!q.includes('section') || q[0] !== 'section')
+  assert.ok(q.some((x) => /dashboard|empty|settings|chat|kanban|feed/i.test(x)))
+})
+
+test('formatRecommendations prefers shoogle community blocks and labels origin', () => {
+  const text = buildFixPrompt({
+    id: 't2',
+    createdAt: Date.now(),
+    status: 'done',
+    config,
+    pages: [page()],
+    findings: [],
+    flows: [],
+    references: [],
+    recommendations: [
+      {
+        sectionId: 's1',
+        sectionRole: 'content',
+        reason: 'Needs a real dashboard block.',
+        source: 'mixed',
+        items: [
+          {
+            name: 'dashboard-01',
+            registry: '@shadcnblocks',
+            type: 'registry:block',
+            description: 'Community dashboard',
+            addCommand: 'npx shadcn@latest add @shadcnblocks/dashboard-01',
+            source: 'shoogle'
+          },
+          {
+            name: 'card',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Card',
+            addCommand: 'npx shadcn@latest add card',
+            source: 'shadcn'
+          }
+        ]
+      }
+    ],
+    visualDiffs: [],
+    interactions: [],
+    log: []
+  } as Run)
+  const dash = text.indexOf('@shadcnblocks/dashboard-01')
+  const card = text.indexOf('npx shadcn@latest add card')
+  assert.ok(dash >= 0, 'community block present')
+  assert.ok(card < 0 || dash < card, 'community block should appear before generic card')
+  assert.match(text, /community @shadcnblocks/)
+})
+
+/* ------------------------------ fix prompts ------------------------------ */
+
+function finding(partial: Partial<Finding> & Pick<Finding, 'id' | 'title'>): Finding {
+  return {
+    category: 'accessibility',
+    severity: 'major',
+    detail: 'detail',
+    fix: 'fix it',
+    pageUrl: 'http://localhost:5181/',
+    source: 'heuristic',
+    ...partial
+  }
+}
+
+test('prompt helpers trim evidence, pathnames and hashed selectors', () => {
+  assert.equal(pathnameOf('http://localhost:5181/settings'), '/settings')
+  assert.equal(stableSelector('.styles-module__settingsBrand___OoKlM'), undefined)
+  assert.equal(stableSelector('[type="checkbox"]'), '[type="checkbox"]')
+  assert.equal(stableSelector('[data-active="false"]'), '[data-active="false"]')
+  const long =
+    'First sentence is complete. Second sentence goes on and on with filler words that would otherwise be chopped mid-token by a naive slice at five hundred characters so we need enough length here to exceed the limit and prove sentence-boundary trimming works correctly for the remediation brief that coding agents paste into chat windows every day when fixing UI bugs from Qualition audits on real products with many findings stacked together in one markdown document for remediation.'
+  const trimmed = trimEvidence(long, 200)
+  assert.ok(trimmed.length <= 200)
+  assert.ok(trimmed.endsWith('.') || trimmed.endsWith('…'))
+  assert.ok(!trimmed.endsWith(' mid'))
+})
+
+test('dedupeFindingsForPrompt collapses near-duplicate a11y and overlap findings', () => {
+  const list = [
+    finding({
+      id: 'f11',
+      title: 'axe: Buttons must have discernible text',
+      severity: 'critical',
+      source: 'axe',
+      pageUrl: 'http://localhost:5181/'
+    }),
+    finding({
+      id: 'f16',
+      title: '16 icon-only buttons without a label',
+      severity: 'major',
+      source: 'heuristic',
+      pageUrl: 'http://localhost:5181/settings'
+    }),
+    finding({
+      id: 'f19',
+      title: '16 overlapping interactive elements at desktop',
+      category: 'responsive',
+      severity: 'major',
+      pageUrl: 'http://localhost:5181/',
+      viewport: 'desktop'
+    }),
+    finding({
+      id: 'f21',
+      title: '14 overlapping interactive elements at tablet',
+      category: 'responsive',
+      severity: 'major',
+      pageUrl: 'http://localhost:5181/chat',
+      viewport: 'tablet'
+    })
+  ]
+  const deduped = dedupeFindingsForPrompt(list)
+  assert.equal(deduped.length, 2)
+  assert.ok(deduped.some((f) => f.id === 'f11'))
+  assert.ok(deduped.some((f) => /Affects 2 pages/i.test(f.detail)))
+})
+
+test('buildFixPrompt groups root causes, uses pathnames, and drops hashed selectors', () => {
+  const run: Run = {
+    id: 't1',
+    createdAt: Date.now(),
+    status: 'done',
+    config,
+    pages: [page({ url: 'http://localhost:5181/' }), page({ url: 'http://localhost:5181/settings' })],
+    findings: [
+      finding({
+        id: 'f11',
+        title: 'axe: Buttons must have discernible text',
+        severity: 'critical',
+        source: 'axe',
+        selector: '.styles-module__buttonWrapper___abc12',
+        detail: '5 nodes. Targets: [data-active="false"]. Affects 5 pages: /, /settings, /templates, /chat, /tasks'
+      }),
+      finding({
+        id: 'f16',
+        title: '16 icon-only buttons without a label',
+        severity: 'major',
+        detail: 'Buttons with no text and no aria-label.'
+      }),
+      finding({
+        id: 'i1',
+        title: 'Nothing is reachable by keyboard',
+        severity: 'critical',
+        detail: 'Pressing Tab never lands on a focusable control.',
+        source: 'heuristic'
+      }),
+      finding({
+        id: 'i2',
+        title: '1 control(s) have no visible focus state',
+        severity: 'major',
+        detail: 'Focused programmatically with zero computed-style change: Search',
+        source: 'heuristic'
+      }),
+      finding({
+        id: 'f1',
+        title: '29 distinct colours in use',
+        category: 'coherence',
+        severity: 'critical',
+        detail: 'Palette budget is ~12. Found 29.'
+      }),
+      finding({
+        id: 'g50',
+        title: 'Keyboard focus is visually absent on primary navigation controls',
+        severity: 'critical',
+        source: 'ai',
+        pageUrl: 'http://localhost:5181/settings',
+        detail: 'Search, Personal, and Workspace can receive focus but show no ring.'
+      })
+    ],
+    flows: [],
+    references: [],
+    recommendations: [
+      {
+        sectionId: 's1',
+        sectionRole: 'content',
+        reason: 'Standardise this content section on registry components.',
+        source: 'shadcn',
+        items: [
+          { name: 'card', registry: '@shadcn', type: 'registry:ui', description: 'Card', addCommand: 'npx shadcn@latest add card', source: 'shadcn' },
+          { name: 'separator', registry: '@shadcn', type: 'registry:ui', description: 'Separator', addCommand: 'npx shadcn@latest add separator', source: 'shadcn' },
+          { name: 'breadcrumb', registry: '@shadcn', type: 'registry:ui', description: 'Breadcrumb', addCommand: 'npx shadcn@latest add breadcrumb', source: 'shadcn' }
+        ]
+      },
+      {
+        sectionId: 's2',
+        sectionRole: 'content',
+        reason: 'Standardise this content section on registry components.',
+        source: 'shadcn',
+        items: [
+          { name: 'card', registry: '@shadcn', type: 'registry:ui', description: 'Card', addCommand: 'npx shadcn@latest add card', source: 'shadcn' },
+          { name: 'tabs', registry: '@shadcn', type: 'registry:ui', description: 'Tabs', addCommand: 'npx shadcn@latest add tabs', source: 'shadcn' }
+        ]
+      },
+      {
+        sectionId: 's6',
+        sectionRole: 'nav',
+        reason: 'Nav needs focus and names.',
+        source: 'shadcn',
+        items: [
+          { name: 'button', registry: '@shadcn', type: 'registry:ui', description: 'Button', addCommand: 'npx shadcn@latest add button', source: 'shadcn' },
+          { name: 'navigation-menu', registry: '@shadcn', type: 'registry:ui', description: 'Nav', addCommand: 'npx shadcn@latest add navigation-menu', source: 'shadcn' }
+        ]
+      }
+    ],
+    visualDiffs: [],
+    interactions: [],
+    log: []
+  }
+
+  const text = buildFixPrompt(run)
+  assert.match(text, /## Root causes \(fix in this order\)/)
+  assert.match(text, /Accessibility/)
+  assert.match(text, /Design tokens/)
+  assert.match(text, /Where: \//)
+  assert.doesNotMatch(text, /styles-module__/)
+  assert.match(text, /prefer measured interaction-probe and axe/i)
+  // Generic content pack listed once, not twice
+  const cardMentions = [...text.matchAll(/npx shadcn@latest add card/g)]
+  assert.equal(cardMentions.length, 1)
+  assert.match(text, /### nav/)
+  assert.match(text, /Execute the root-cause list above in order/)
 })

@@ -8,6 +8,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { join } from 'node:path'
 import { extractFn, observerInit } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
+import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
 import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
 import type {
@@ -237,21 +238,59 @@ export async function capturePage(
             /* selector drifted; section still reported */
           }
         }
-        // Authored CSS: same-origin text came back inline; fetch the rest.
+        // Authored CSS: same-origin text came back per-sheet; fetch the rest.
         try {
-          let cssText: string = data.css?.text ?? ''
-          for (const href of data.css?.external ?? []) {
+          const sheetInputs: CssSheetInput[] = Array.isArray(data.css?.sheets)
+            ? data.css.sheets.map((s: { href?: string | null; text?: string }) => ({
+                href: s.href ?? null,
+                text: s.text ?? ''
+              }))
+            : data.css?.text
+              ? [{ href: null, text: String(data.css.text) }]
+              : []
+
+          let missedExternals = 0
+          const externalList: string[] = data.css?.external ?? []
+          for (const href of externalList) {
             try {
               const res = await ctx.request.get(href, { timeout: 8000 })
-              if (res.ok()) cssText += '\n' + (await res.text())
+              if (res.ok()) {
+                sheetInputs.push({ href, text: await res.text() })
+              } else {
+                missedExternals++
+              }
             } catch {
-              /* blocked or gone */
+              missedExternals++
             }
           }
-          cssStats = analyzeCss(cssText, data.css?.sheetCount ?? 0)
+          // Cap was applied in-page for listed externals; anything beyond still counts as missed.
+          if (data.css?.missedExternalCap) missedExternals += Math.max(0, (data.css?.external?.length ?? 0) === 30 ? 1 : 0)
+
+          const partition = partitionCssSheets(sheetInputs, url)
+          cssStats = analyzeCss(partition.analysis, partition.scoped ? partition.sheetCounts.app : partition.sheetCounts.total, {
+            attribution: {
+              scoped: partition.scoped,
+              appBytes: partition.bytes.app,
+              frameworkBytes: partition.bytes.framework,
+              vendorBytes: partition.bytes.vendor,
+              totalBytes: partition.bytes.total,
+              appSheets: partition.sheetCounts.app,
+              frameworkSheets: partition.sheetCounts.framework,
+              vendorSheets: partition.sheetCounts.vendor,
+              missedExternals,
+              truncated: !!data.css?.truncated,
+              styleAttrCount: Number(data.css?.styleAttrCount ?? 0),
+              adoptedSheetCount: Number(data.css?.adoptedSheetCount ?? 0)
+            }
+          })
           try {
             const slugTok = slug.replace(/_+/g, '-').slice(0, 40) || 'page'
-            tokenDictionary = await buildTokenDictionary(cssText, opts.outDir, slugTok)
+            // Tokens from first-party CSS when available; otherwise full concat.
+            tokenDictionary = await buildTokenDictionary(
+              partition.scoped ? partition.app : partition.analysis,
+              opts.outDir,
+              slugTok
+            )
           } catch (e) {
             opts.onLog?.(`token extract failed on ${url}: ${(e as Error).message}`)
           }

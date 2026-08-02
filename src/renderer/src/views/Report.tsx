@@ -114,7 +114,7 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
         </div>
       )}
 
-      <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
+      <nav className="sticky top-0 z-[5] -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
         <div className="flex gap-0.5 overflow-x-auto">
           {TABS.map((t) => (
             <button
@@ -237,8 +237,8 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
       </Button>
       {open && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 z-20 mt-1 w-64 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 z-50 mt-1 w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/50">
             {PROMPT_SCOPES.map((s) => (
               <button
                 key={s.id}
@@ -588,15 +588,23 @@ function Tokens({ page }: { page: CapturedPage }): JSX.Element {
       {page.cssStats && (
         <Panel title="Authored CSS · Project Wallace" className="col-span-2">
           <div className="grid grid-cols-4 gap-3 text-[12px]">
-            <Stat label="stylesheet" value={`${(page.cssStats.bytes / 1024).toFixed(0)} kB`} sub={`${page.cssStats.sheets} sheets · ${page.cssStats.rules} rules`} />
+            <Stat
+              label="stylesheet"
+              value={`${(page.cssStats.bytes / 1024).toFixed(0)} kB`}
+              sub={
+                page.cssStats.attribution
+                  ? `${(page.cssStats.attribution.appBytes / 1024).toFixed(0)}kB app · ${(((page.cssStats.attribution.frameworkBytes + page.cssStats.attribution.vendorBytes) / 1024)).toFixed(0)}kB fw${page.cssStats.attribution.scoped ? '' : ' · unscoped'}`
+                  : `${page.cssStats.sheets} sheets · ${page.cssStats.rules} rules`
+              }
+            />
             <Stat
               label="colour reuse"
               value={`${(page.cssStats.colorUniquenessRatio * 100).toFixed(0)}%`}
               sub={`${page.cssStats.colorsUnique} unique / ${page.cssStats.colorsTotal} declared`}
               bad={page.cssStats.colorUniquenessRatio > 0.35}
             />
-            <Stat label="font sizes" value={String(page.cssStats.fontSizesUnique)} sub="authored, not rendered" bad={page.cssStats.fontSizesUnique > 12} />
-            <Stat label="radii / shadows" value={`${page.cssStats.radiiUnique} / ${page.cssStats.shadowsUnique}`} sub="unique values" bad={page.cssStats.radiiUnique > 6} />
+            <Stat label="font sizes" value={String(page.cssStats.fontSizesUnique)} sub="authored, not rendered" bad={page.cssStats.fontSizesUnique > 18} />
+            <Stat label="radii / shadows" value={`${page.cssStats.radiiUnique} / ${page.cssStats.shadowsUnique}`} sub="unique values" bad={page.cssStats.radiiUnique > 10} />
             <Stat label="!important" value={`${(page.cssStats.importantRatio * 100).toFixed(1)}%`} sub="of declarations" bad={page.cssStats.importantRatio > 0.03} />
             <Stat label="max specificity" value={`(${page.cssStats.maxSpecificity})`} sub={`ids ${(page.cssStats.idSelectorRatio * 100).toFixed(1)}%`} />
             <Stat label="z-index" value={String(page.cssStats.zIndexMax)} sub={`${page.cssStats.zIndexUnique} unique`} bad={page.cssStats.zIndexMax >= 1000} />
@@ -612,12 +620,32 @@ function Tokens({ page }: { page: CapturedPage }): JSX.Element {
               css-tree located {page.cssStats.locations.length} issue site(s) — cited on coherence findings.
             </p>
           )}
+          {page.cssStats.attribution && (page.cssStats.attribution.truncated || page.cssStats.attribution.missedExternals > 0) && (
+            <p className="mt-2 text-[11px] text-amber-400/90">
+              Collection incomplete
+              {page.cssStats.attribution.truncated ? ' · hit 4MB cap' : ''}
+              {page.cssStats.attribution.missedExternals > 0
+                ? ` · ${page.cssStats.attribution.missedExternals} external sheet(s) missed`
+                : ''}
+            </p>
+          )}
         </Panel>
       )}
       {page.tokenDictionary && page.tokenDictionary.count > 0 && (
         <Panel title="Design tokens · Style Dictionary" className="col-span-2">
           <div className="grid grid-cols-4 gap-3 text-[12px]">
-            <Stat label="tokens" value={String(page.tokenDictionary.count)} sub={page.tokenDictionary.buildError ? 'build failed' : 'extracted'} bad={!!page.tokenDictionary.buildError} />
+            <Stat
+              label="tokens"
+              value={String(page.tokenDictionary.count)}
+              sub={
+                page.tokenDictionary.buildError
+                  ? 'build failed'
+                  : page.tokenDictionary.frameworkCount
+                    ? `app · skipped ${page.tokenDictionary.frameworkCount} fw`
+                    : 'extracted'
+              }
+              bad={!!page.tokenDictionary.buildError}
+            />
             <Stat label="colours" value={String(page.tokenDictionary.groups.colors)} sub="--color-* family" />
             <Stat label="spacing" value={String(page.tokenDictionary.groups.spacing)} sub="space / gap / pad" />
             <Stat label="type / radii / shadows" value={`${page.tokenDictionary.groups.typography} / ${page.tokenDictionary.groups.radii} / ${page.tokenDictionary.groups.shadows}`} sub="grouped" />

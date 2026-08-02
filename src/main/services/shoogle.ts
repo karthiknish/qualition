@@ -85,32 +85,99 @@ export async function searchShoogle(query: string, limit = 8, registries?: strin
  * block names, which is what Shoogle full-text matches on.
  */
 const ROLE_QUERIES: Record<SectionRole, string[]> = {
-  nav: ['navbar', 'header', 'menu'],
-  hero: ['hero', 'banner'],
-  features: ['feature', 'bento', 'grid'],
-  pricing: ['pricing', 'plan'],
-  testimonials: ['testimonial', 'review'],
+  nav: ['sidebar navigation', 'navbar', 'app sidebar', 'settings nav'],
+  hero: ['hero', 'banner', 'landing hero'],
+  features: ['feature', 'bento', 'feature grid'],
+  pricing: ['pricing', 'pricing table', 'plan cards'],
+  testimonials: ['testimonial', 'review', 'social proof'],
   logos: ['logo cloud', 'logos', 'marquee'],
-  faq: ['faq', 'accordion'],
+  faq: ['faq', 'accordion faq'],
   cta: ['cta', 'call to action'],
-  form: ['login', 'signup', 'contact form'],
-  table: ['data table', 'table'],
-  gallery: ['gallery', 'carousel'],
-  stats: ['stats', 'metrics', 'chart'],
+  form: ['login form', 'signup', 'settings form', 'contact form'],
+  table: ['data table', 'tanstack table', 'orders table'],
+  gallery: ['gallery', 'carousel', 'template gallery', 'card grid'],
+  stats: ['stats', 'kpi cards', 'dashboard metrics', 'chart'],
   footer: ['footer'],
-  content: ['section', 'card']
+  // "content" is the catch-all for app shells — query product UI, not "section/card".
+  content: ['dashboard', 'empty state', 'settings page', 'chat', 'kanban', 'activity feed']
 }
 
-/** Best-effort block candidates for a section role, deduplicated. */
+/** Extra search phrases pulled from section copy + finding titles. */
+export function queriesForSection(
+  role: SectionRole,
+  section: { label?: string; headings?: string[]; ctaLabels?: string[]; textPreview?: string },
+  problems: string[] = []
+): string[] {
+  const out: string[] = [...(ROLE_QUERIES[role] ?? [role])]
+  const blob = [section.label, ...(section.headings ?? []), ...(section.ctaLabels ?? []), section.textPreview ?? '', ...problems]
+    .join(' ')
+    .toLowerCase()
+
+  const hints: [RegExp, string][] = [
+    [/\bsettings?\b/, 'settings page'],
+    [/\bsidebar\b|\bnavigation\b/, 'app sidebar'],
+    [/\bchat\b|\bcomposer\b|\binbox\b|\bmessage\b/, 'chat interface'],
+    [/\btask\b|\bkanban\b|\bboard\b|\bcolumn\b/, 'kanban board'],
+    [/\btemplate\b|\bstarter\b/, 'template gallery'],
+    [/\bdashboard\b|\boverview\b|\bkpi\b/, 'dashboard'],
+    [/\bchart\b|\bmetrics?\b|\bspark\b/, 'chart stats'],
+    [/\bempty\b|\bno (results|data|items)\b/, 'empty state'],
+    [/\bpricing\b|\bplan\b/, 'pricing'],
+    [/\blogin\b|\bsign[- ]?in\b|\bauth\b/, 'login form'],
+    [/\btable\b|\bgrid\b/, 'data table'],
+    [/\bmodal\b|\bdialog\b|\bsheet\b|\boverlay\b/, 'dialog sheet'],
+    [/\bcommand\b|\bpalette\b|\bsearch\b/, 'command menu']
+  ]
+  for (const [re, q] of hints) {
+    if (re.test(blob)) out.push(q)
+  }
+
+  // Short free-text from the section label itself when it looks intentional.
+  const label = (section.label ?? '').trim()
+  if (label.length >= 4 && label.length <= 48 && !/^s\d+$/i.test(label)) out.push(label)
+
+  // Dedupe, keep order, cap.
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const q of out) {
+    const k = q.toLowerCase()
+    if (seen.has(k)) continue
+    seen.add(k)
+    unique.push(q)
+  }
+  return unique.slice(0, 6)
+}
+
+/** Best-effort block candidates for a section, deduplicated. */
 export async function shoogleForRole(role: SectionRole, perQuery = 4): Promise<ShoogleItem[]> {
+  return shoogleForQueries(ROLE_QUERIES[role] ?? [role], perQuery)
+}
+
+/** Context-aware Shoogle search for a concrete page section. */
+export async function shoogleForSection(
+  role: SectionRole,
+  section: { label?: string; headings?: string[]; ctaLabels?: string[]; textPreview?: string },
+  problems: string[] = [],
+  limit = 6
+): Promise<ShoogleItem[]> {
+  const queries = queriesForSection(role, section, problems)
+  const items = await shoogleForQueries(queries, Math.max(3, Math.ceil(limit / 2)))
+  return items.slice(0, limit)
+}
+
+async function shoogleForQueries(queries: string[], perQuery: number): Promise<ShoogleItem[]> {
   const out: ShoogleItem[] = []
   const seen = new Set<string>()
-  for (const q of ROLE_QUERIES[role] ?? [role]) {
+  let hardFail = 0
+  for (const q of queries) {
     let items: ShoogleItem[] = []
     try {
       items = await searchShoogle(q, perQuery)
     } catch {
-      break // server down: let the caller fall back
+      hardFail++
+      // One flaky query should not abandon the rest; bail only if nothing works.
+      if (hardFail >= 2 && out.length === 0) break
+      continue
     }
     for (const it of items) {
       const key = it.addCommandArgument

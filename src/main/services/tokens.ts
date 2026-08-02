@@ -9,6 +9,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import * as csstree from 'css-tree'
+import { isFrameworkTokenName } from './cssScope.js'
 import type { CapturedPage, Finding, RunConfig, Severity, TokenDictionary } from '../../shared/types.js'
 
 let seq = 0
@@ -62,9 +63,14 @@ function nestToken(
 }
 
 /** Pull `--*` custom properties out of authored CSS into a Style Dictionary tree. */
-export function extractTokenTree(css: string): { tokens: Record<string, any>; flat: { name: string; value: string; type: string }[] } {
+export function extractTokenTree(css: string): {
+  tokens: Record<string, any>
+  flat: { name: string; value: string; type: string }[]
+  frameworkCount: number
+} {
   const flat: { name: string; value: string; type: string }[] = []
-  if (!css || css.length < 20) return { tokens: {}, flat }
+  let frameworkCount = 0
+  if (!css || css.length < 20) return { tokens: {}, flat, frameworkCount: 0 }
 
   try {
     const ast = csstree.parse(css, { positions: false, parseValue: false, parseCustomProperty: true })
@@ -80,11 +86,15 @@ export function extractTokenTree(css: string): { tokens: Record<string, any>; fl
       }
       if (!value || value.length > 200) return
       const name = prop.slice(2)
+      if (isFrameworkTokenName(name)) {
+        frameworkCount++
+        return
+      }
       const type = inferType(name, value)
       flat.push({ name, value, type })
     })
   } catch {
-    return { tokens: {}, flat }
+    return { tokens: {}, flat, frameworkCount }
   }
 
   // Dedupe by name (last wins — later themes override).
@@ -99,7 +109,7 @@ export function extractTokenTree(css: string): { tokens: Record<string, any>; fl
     // legacy value/type alongside so older tooling still reads the JSON.
     nestToken(tokens, path, { $value: value, $type: type, value, type })
   }
-  return { tokens, flat: [...byName.entries()].map(([name, v]) => ({ name, ...v })) }
+  return { tokens, flat: [...byName.entries()].map(([name, v]) => ({ name, ...v })), frameworkCount }
 }
 
 function groupCounts(flat: { type: string }[]): TokenDictionary['groups'] {
@@ -124,12 +134,13 @@ export async function buildTokenDictionary(
   outDir: string,
   slug = 'tokens'
 ): Promise<TokenDictionary | null> {
-  const { tokens, flat } = extractTokenTree(css)
+  const { tokens, flat, frameworkCount } = extractTokenTree(css)
   if (flat.length < 2) return null
 
   const dict: TokenDictionary = {
     tokens,
     count: flat.length,
+    frameworkCount,
     groups: groupCounts(flat)
   }
 
@@ -189,7 +200,7 @@ export function auditTokens(
         page,
         dict.count > 250 ? 'major' : 'minor',
         `${dict.count} design tokens extracted from authored CSS`,
-        `Style Dictionary groups — colour ${g.colors}, spacing ${g.spacing}, type ${g.typography}, radii ${g.radii}, shadows ${g.shadows}, other ${g.other}.`,
+        `Style Dictionary groups — colour ${g.colors}, spacing ${g.spacing}, type ${g.typography}, radii ${g.radii}, shadows ${g.shadows}, other ${g.other}.${dict.frameworkCount ? ` Skipped ${dict.frameworkCount} framework custom properties (--tw-*, etc.).` : ''}`,
         'Collapse one-offs. A publishable token set is usually under ~80 names with clear aliases.'
       )
     )

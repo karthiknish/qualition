@@ -590,21 +590,42 @@ export const extractFn = function (): any {
   /* ------------------------------ stylesheets --------------------------- */
   // Same-origin sheets can be read directly; cross-origin ones throw on
   // cssRules, so we hand their URLs back for the main process to fetch.
-  let cssText = ''
+  // document.styleSheets already includes <style> elements — do NOT also
+  // append querySelectorAll('style') textContent or bytes/rules double-count.
+  const CSS_CAP = 4_000_000
+  const sheetsOut: { href: string | null; text: string }[] = []
   const externalSheets: string[] = []
   let sheetCount = 0
+  let cssBytes = 0
+  let truncated = false
   for (const sheet of Array.from(document.styleSheets)) {
     sheetCount++
     try {
       const rules = (sheet as CSSStyleSheet).cssRules
       let chunk = ''
       for (const rule of Array.from(rules)) chunk += rule.cssText + '\n'
-      cssText += chunk
+      if (cssBytes >= CSS_CAP) {
+        truncated = true
+        continue
+      }
+      if (cssBytes + chunk.length > CSS_CAP) {
+        chunk = chunk.slice(0, CSS_CAP - cssBytes)
+        truncated = true
+      }
+      cssBytes += chunk.length
+      sheetsOut.push({ href: sheet.href ?? null, text: chunk })
     } catch {
       if (sheet.href) externalSheets.push(sheet.href)
     }
   }
-  for (const el of Array.from(document.querySelectorAll('style'))) cssText += el.textContent ?? ''
+
+  let adoptedSheetCount = 0
+  try {
+    adoptedSheetCount = (document as any).adoptedStyleSheets?.length ?? 0
+  } catch {
+    adoptedSheetCount = 0
+  }
+  const styleAttrCount = Array.from(document.querySelectorAll('[style]')).length
 
   const perf = (() => {
     const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
@@ -627,7 +648,17 @@ export const extractFn = function (): any {
     sections,
     responsive: { horizontalOverflowPx, tinyTextCount, smallTapTargets, overlaps },
     links: Array.from(new Set(links)).slice(0, 200),
-    css: { text: cssText.slice(0, 4_000_000), external: externalSheets.slice(0, 30), sheetCount },
+    css: {
+      sheets: sheetsOut,
+      /** @deprecated concat kept for older callers; prefer sheets[] */
+      text: sheetsOut.map((s) => s.text).join('\n').slice(0, CSS_CAP),
+      external: externalSheets.slice(0, 30),
+      sheetCount,
+      truncated,
+      missedExternalCap: externalSheets.length > 30,
+      styleAttrCount,
+      adoptedSheetCount
+    },
     controls,
     signals: {
       imagesMissingAlt,

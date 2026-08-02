@@ -108,7 +108,10 @@ export interface CssLocation {
 /** Style Dictionary–shaped token inventory extracted from authored CSS. */
 export interface TokenDictionary {
   tokens: Record<string, unknown>
+  /** First-party custom properties kept in the publishable tree. */
   count: number
+  /** Framework/vendor custom properties skipped (e.g. --tw-*). */
+  frameworkCount?: number
   groups: {
     colors: number
     spacing: number
@@ -149,6 +152,24 @@ export interface CssStats {
   qualityViolations: { id: string; score: number; value: unknown }[]
   /** css-tree source locations for the issues we care about. */
   locations: CssLocation[]
+  /**
+   * Attribution: metrics above are computed on first-party CSS when `scoped`
+   * is true. Totals always describe everything we could collect.
+   */
+  attribution?: {
+    scoped: boolean
+    appBytes: number
+    frameworkBytes: number
+    vendorBytes: number
+    totalBytes: number
+    appSheets: number
+    frameworkSheets: number
+    vendorSheets: number
+    missedExternals: number
+    truncated: boolean
+    styleAttrCount: number
+    adoptedSheetCount: number
+  }
 }
 
 export interface AxeViolation {

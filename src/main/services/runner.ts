@@ -463,9 +463,9 @@ export async function executeRun(
       log('warn', `AI critique enabled but ${cfg.provider} is not configured — skipped.`)
     }
 
-    /* 5. shadcn recommendations per section */
+    /* 5. registry recommendations per section (Shoogle community first, shadcn fallback) */
     if (cfg.useShadcn) {
-      progress('shadcn', 78, 'Matching sections to shadcn registry components')
+      progress('components', 78, 'Matching sections to Shoogle community registries + shadcn')
       for (const page of run.pages) {
         for (const s of page.sections) {
           checkpoint()
@@ -481,7 +481,11 @@ export async function executeRun(
         }
       }
       const shoogleBacked = run.recommendations.filter((r) => r.source !== 'shadcn').length
-      progress('components', 84, `${run.recommendations.length} section recommendation(s) · ${shoogleBacked} from Shoogle community registries`)
+      progress(
+        'components',
+        84,
+        `${run.recommendations.length} section recommendation(s) · ${shoogleBacked} with Shoogle community blocks${shoogleBacked === 0 ? ' (shadcn-only fallback)' : ''}`
+      )
       await saveRun(run)
     }
 

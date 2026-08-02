@@ -43,12 +43,16 @@ export function renderMarkdownReport(run: Run): string {
   if (withCss.length) {
     lines.push('## Authored CSS (Project Wallace)')
     lines.push('')
-    lines.push('| Page | Size | Rules | Colour reuse | Font sizes | Radii | Shadows | !important | Max spec | z-index | Maint./Cplx |')
-    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+    lines.push('| Page | Size | App/FW | Rules | Colour reuse | Font sizes | Radii | Shadows | !important | Max spec | z-index | Maint./Cplx |')
+    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
     for (const p of withCss) {
       const c = p.cssStats!
+      const a = c.attribution
+      const split = a
+        ? `${(a.appBytes / 1024).toFixed(0)}/${(((a.frameworkBytes + a.vendorBytes) / 1024)).toFixed(0)}kB${a.scoped ? '' : '*'}`
+        : '—'
       lines.push(
-        `| ${new URL(p.url).pathname || '/'} | ${(c.bytes / 1024).toFixed(0)} kB | ${c.rules} | ${c.colorsUnique}/${c.colorsTotal} (${(c.colorUniquenessRatio * 100).toFixed(0)}%) | ${c.fontSizesUnique} | ${c.radiiUnique} | ${c.shadowsUnique} | ${(c.importantRatio * 100).toFixed(1)}% | (${c.maxSpecificity}) | ${c.zIndexMax} | ${c.quality.maintainability}/${c.quality.complexity} |`
+        `| ${new URL(p.url).pathname || '/'} | ${(c.bytes / 1024).toFixed(0)} kB | ${split} | ${c.rules} | ${c.colorsUnique}/${c.colorsTotal} (${(c.colorUniquenessRatio * 100).toFixed(0)}%) | ${c.fontSizesUnique} | ${c.radiiUnique} | ${c.shadowsUnique} | ${(c.importantRatio * 100).toFixed(1)}% | (${c.maxSpecificity}) | ${c.zIndexMax} | ${c.quality.maintainability}/${c.quality.complexity} |`
       )
     }
     lines.push('')
@@ -69,12 +73,12 @@ export function renderMarkdownReport(run: Run): string {
   if (withTokens.length) {
     lines.push('## Design tokens (Style Dictionary)')
     lines.push('')
-    lines.push('| Page | Tokens | Colours | Spacing | Type | Radii | Shadows |')
-    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
+    lines.push('| Page | Tokens | FW skipped | Colours | Spacing | Type | Radii | Shadows |')
+    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
     for (const p of withTokens) {
       const t = p.tokenDictionary!
       lines.push(
-        `| ${new URL(p.url).pathname || '/'} | ${t.count} | ${t.groups.colors} | ${t.groups.spacing} | ${t.groups.typography} | ${t.groups.radii} | ${t.groups.shadows} |`
+        `| ${new URL(p.url).pathname || '/'} | ${t.count} | ${t.frameworkCount ?? 0} | ${t.groups.colors} | ${t.groups.spacing} | ${t.groups.typography} | ${t.groups.radii} | ${t.groups.shadows} |`
       )
     }
     lines.push('')

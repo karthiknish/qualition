@@ -6,7 +6,7 @@
  *   - item payload:    https://ui.shadcn.com/r/styles/new-york/<name>.json
  * Extra registries (registry.json / index.json shaped) can be added in Settings.
  */
-import { shoogleForRole, shoogleAddCommand } from './shoogle.js'
+import { shoogleForSection, shoogleAddCommand } from './shoogle.js'
 import type { ComponentRecommendation, PageSection, SectionRole } from '../../shared/types.js'
 
 export interface RegistryItem {
@@ -66,7 +66,7 @@ const ROLE_COMPONENTS: Record<SectionRole, string[]> = {
   gallery: ['carousel', 'aspect-ratio', 'card', 'dialog', 'scroll-area'],
   stats: ['card', 'chart', 'progress', 'badge'],
   footer: ['separator', 'navigation-menu', 'button', 'input-group'],
-  content: ['card', 'separator', 'breadcrumb', 'tabs', 'scroll-area']
+  content: ['card', 'button', 'separator']
 }
 
 let indexCache: { at: number; items: RegistryItem[] } | null = null
@@ -175,9 +175,9 @@ export function addCommand(item: RegistryItem): string {
  * Recommend replacements for a section.
  *
  * Shoogle (11k+ community blocks across every registry) is tried FIRST because
- * a whole pre-built `pricing7` block beats assembling card+badge+button by hand.
- * The first-party shadcn registry fills in the primitives, and takes over
- * completely if Shoogle is unreachable.
+ * a whole pre-built block beats assembling card+badge+button by hand.
+ * First-party shadcn fills a small primitive gap only when Shoogle returns
+ * nothing useful, or to cover a11y primitives (button/label/dialog) once.
  */
 export async function recommendForSection(
   section: PageSection,
@@ -187,39 +187,51 @@ export async function recommendForSection(
 ): Promise<ComponentRecommendation> {
   const out: ComponentRecommendation['items'] = []
   let shoogleCount = 0
+  let shoogleAttempted = false
 
   if (useShoogle) {
+    shoogleAttempted = true
     try {
-      for (const it of await shoogleForRole(section.role, 4)) {
+      for (const it of await shoogleForSection(section.role, section, problems, 6)) {
         out.push({
           name: it.name,
           registry: it.registry,
           type: it.type,
-          description: it.description,
+          description: it.description || `${it.registry} community block`,
           addCommand: shoogleAddCommand(it),
           docs: it.homepage,
           source: 'shoogle'
         })
         shoogleCount++
-        if (shoogleCount >= 4) break
+        if (shoogleCount >= 5) break
       }
     } catch {
       /* Shoogle down — shadcn fallback below still runs */
     }
   }
 
-  const fallback = await recommendFromShadcn(section, extra, 6 - out.length)
+  // When community blocks landed, only add 1–2 first-party primitives (not the
+  // whole ROLE_COMPONENTS dump). When Shoogle missed, fill more from shadcn.
+  const shadcnSlots = shoogleCount > 0 ? Math.min(2, 6 - out.length) : Math.min(5, 6 - out.length)
+  const fallback = await recommendFromShadcn(section, extra, shadcnSlots, shoogleCount > 0)
   out.push(...fallback)
+
+  const communityNote =
+    shoogleCount > 0
+      ? 'Community registry blocks below are drop-in section replacements; first-party shadcn items are primitives only. '
+      : shoogleAttempted
+        ? 'Shoogle returned no community blocks for this section — falling back to first-party shadcn primitives. '
+        : ''
 
   const reason =
     problems.length > 0
-      ? `This ${section.role} section has: ${problems.slice(0, 3).join('; ')}. ${shoogleCount > 0 ? 'Community blocks below are drop-in replacements for the whole section; ' : ''}registry primitives fix token drift, focus states and a11y semantics in one pass.`
-      : `Standardise this ${section.role} section on registry components so spacing, radius, focus rings and dark-mode tokens stay coherent with the rest of the product.`
+      ? `This ${section.role} section has: ${problems.slice(0, 3).join('; ')}. ${communityNote}Prefer a matching block over hand-rolling markup.`
+      : `${communityNote}Standardise this ${section.role} section on a registry block or primitive so spacing, radius, focus rings and tokens stay coherent.`
 
   return {
     sectionId: section.id,
     sectionRole: section.role,
-    reason,
+    reason: reason.trim(),
     source: shoogleCount > 0 && fallback.length > 0 ? 'mixed' : shoogleCount > 0 ? 'shoogle' : 'shadcn',
     items: out.slice(0, 8)
   }
@@ -228,7 +240,8 @@ export async function recommendForSection(
 async function recommendFromShadcn(
   section: PageSection,
   extra: { name: string; url: string }[],
-  limit: number
+  limit: number,
+  primitivesOnly = false
 ): Promise<ComponentRecommendation['items']> {
   if (limit <= 0) return []
   const items = await loadRegistry(extra)
@@ -239,12 +252,19 @@ async function recommendFromShadcn(
     if (it && !picks.some((p) => p.name === it.name && p.registry === it.registry)) picks.push(it)
   }
 
-  for (const n of ROLE_COMPONENTS[section.role] ?? []) push(byName.get(`@shadcn/${n}`))
+  const roleList = primitivesOnly
+    ? (ROLE_COMPONENTS[section.role] ?? []).filter((n) =>
+        /^(button|label|input|checkbox|dialog|sheet|dropdown-menu|navigation-menu|form|field|select)$/.test(n)
+      )
+    : (ROLE_COMPONENTS[section.role] ?? [])
 
-  const textQuery = [section.label, ...section.headings.slice(0, 2), ...section.ctaLabels.slice(0, 2)].join(' ')
-  for (const it of searchRegistry(items, textQuery, 4)) push(it)
-  for (const b of BLOCKS.filter((b) => b.roles.includes(section.role)))
-    push(byName.get(`@shadcn/${b.name}`))
+  for (const n of roleList) push(byName.get(`@shadcn/${n}`))
+
+  if (!primitivesOnly) {
+    const textQuery = [section.label, ...section.headings.slice(0, 2), ...section.ctaLabels.slice(0, 2)].join(' ')
+    for (const it of searchRegistry(items, textQuery, 4)) push(it)
+    for (const b of BLOCKS.filter((b) => b.roles.includes(section.role))) push(byName.get(`@shadcn/${b.name}`))
+  }
 
   return picks.slice(0, limit).map((it) => ({
     name: it.name,
