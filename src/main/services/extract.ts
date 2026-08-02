@@ -203,27 +203,26 @@ export const extractFn = function (): any {
   // SPA fallback: no <section> markup anywhere. Find the densest content
   // container on the page and split *that*, instead of walking arbitrary
   // top-level divs (which lands on toast/portal roots).
-  if (candidates.length < 3) {
+  // Count only content roots: header + one root + footer reached the old
+  // threshold of 3 and skipped the descent, which is why app screens came back
+  // as a single section.
+  if (roots.length < 2) {
     const main = document.querySelector('main, [role=main], #root, #app, [data-app]') ?? document.body
+    // Descend only while a single child holds the content. Stop at the first
+    // node that has two or more substantial children - that node is the row of
+    // sections. The previous loop kept descending past it to the densest leaf,
+    // which by definition had nothing left to split, so the whole screen came
+    // back as one section.
     let best: Element = main
-    let bestScore = substance(main)
-    const queue: Element[] = [main]
-    let guard = 0
-    while (queue.length && guard++ < 200) {
-      const node = queue.shift()!
-      for (const child of Array.from(node.children)) {
-        if (!isVisible(child)) continue
-        const s = substance(child)
-        const r = child.getBoundingClientRect()
-        // Keep descending while a single child holds most of the substance
-        // (that child is the real container, the parent is just a wrapper).
-        if (s > bestScore * 0.9 && r.height > 200) {
-          best = child
-          bestScore = s
-          queue.push(child)
-        }
+    for (let depth = 0; depth < 30; depth++) {
+      const kids = Array.from(best.children).filter((c) => isVisible(c) && hasSubstance(c))
+      if (kids.length === 1 && kids[0].getBoundingClientRect().height > 160) {
+        best = kids[0]
+        continue
       }
+      break
     }
+
     // Split the densest container into its meaningful children.
     const blocks = Array.from(best.children).filter((c) => isVisible(c) && hasSubstance(c))
     if (blocks.length >= 2) {
@@ -295,6 +294,17 @@ export const extractFn = function (): any {
   }
   candidates.length = 0
   candidates.push(...work)
+
+  // A candidate that contains two or more other candidates is a layout shell,
+  // not a section. Keeping it made the first accepted section span the whole
+  // screen, after which the containment check rejected every real block inside
+  // it - which is why every page reported a single 's1'.
+  const structural = candidates.filter(
+    (el) => candidates.filter((other) => other !== el && el.contains(other)).length >= 2
+  )
+  const leafCandidates = candidates.filter((el) => !structural.includes(el))
+  candidates.length = 0
+  candidates.push(...(leafCandidates.length >= 2 ? leafCandidates : [...structural, ...leafCandidates]))
 
   const seen = new Set<Element>()
   const docH = document.documentElement.scrollHeight
