@@ -504,8 +504,8 @@ export async function executeRun(
             category: 'flow',
             severity: 'critical',
             title: `Flow "${flow.name}" broke at step ${result.steps.filter((s) => s.ok).length + 1} of ${result.steps.length}`,
-            detail: `${failed?.step.action} ${failed?.step.target ?? ''} — ${failed?.error ?? 'unknown error'}\nThe target was present during the crawl, so this is a real dead end rather than a bad test.`,
-            fix: 'Either the control stops working after the preceding step, or the journey genuinely dead-ends. Both are user-facing failures.',
+            detail: `${failed?.step.action} ${failed?.step.target ?? ''} — ${failed?.error ?? 'unknown error'}\nThe target existed during the crawl, so the journey stops working somewhere after the preceding step.`,
+            fix: 'Confirm by hand before changing code: open the page, perform this step and watch what happens. If the control responds normally to a human, treat this as a flaky selector rather than a product defect — timeouts on elements that resolved but never became clickable are usually a wrapper/overlay issue, not a dead end.',
             pageUrl: cfg.targetUrl,
             evidence: failed?.screenshot ? [failed.screenshot] : undefined,
             source: 'heuristic'

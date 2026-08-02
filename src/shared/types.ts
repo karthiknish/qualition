@@ -180,6 +180,8 @@ export interface PageControl {
   tag: string
   type: string
   role: string
+  /** False for readonly/disabled fields — they can never be filled. */
+  editable?: boolean
   text: string
   placeholder: string
   label: string

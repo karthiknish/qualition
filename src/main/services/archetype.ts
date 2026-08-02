@@ -142,10 +142,17 @@ export function refineRoles(pages: CapturedPage[], archetype: Archetype): void {
     for (const s of p.sections) {
       const hasTable = s.components.some((c) => c.tag === 'table')
       const listish = s.components.some((c) => c.tag === 'li' && c.count >= 3)
-      const fieldy = s.components.some((c) => ['input', 'select', 'textarea'].includes(c.tag))
+      // Almost every app screen contains a global search box. Counting a single
+      // input as "this is a form" turned every section of every page into
+      // role=form, which then asked the component registry for login blocks on
+      // a Kanban board. A form needs an actual <form> or several fields.
+      const fieldCount = s.components
+        .filter((c) => ['input', 'select', 'textarea'].includes(c.tag))
+        .reduce((n, c) => n + c.count, 0)
+      const isForm = s.components.some((c) => c.tag === 'form') || fieldCount >= 3
 
       if (s.role === 'hero' || s.role === 'features' || s.role === 'cta') {
-        s.role = hasTable ? 'table' : fieldy ? 'form' : listish ? 'gallery' : 'content'
+        s.role = hasTable ? 'table' : isForm ? 'form' : listish ? 'gallery' : 'content'
         s.roleConfidence = Math.min(s.roleConfidence, 0.5)
       }
     }

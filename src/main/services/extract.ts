@@ -416,14 +416,31 @@ export const extractFn = function (): any {
     const labelText =
       input.labels && input.labels.length > 0 ? (input.labels[0].textContent ?? '').replace(/\s+/g, ' ').trim() : ''
     const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+
+    // These strings are used verbatim as selectors, so they must NOT be
+    // clamped: appending an ellipsis produces a handle that exists nowhere on
+    // the page, and a flow built from it can only ever time out.
+    const handle = (s: string): string => s.slice(0, 120)
+
+    // A field that is readonly or disabled can never be filled; proposing one
+    // as a fill target guarantees a timeout.
+    const editable =
+      ['input', 'textarea', 'select'].includes(el.tagName.toLowerCase()) &&
+      !input.readOnly &&
+      !input.disabled &&
+      el.getAttribute('aria-disabled') !== 'true' &&
+      el.getAttribute('aria-readonly') !== 'true' &&
+      !['submit', 'button', 'reset', 'hidden'].includes(el.getAttribute('type') ?? '')
+
     controls.push({
       tag: el.tagName.toLowerCase(),
       type: el.getAttribute('type') ?? '',
       role: el.getAttribute('role') ?? '',
-      text: clamp(text, 60),
-      placeholder: clamp(el.getAttribute('placeholder') ?? '', 60),
-      label: clamp(labelText, 60),
-      ariaLabel: clamp(el.getAttribute('aria-label') ?? '', 60),
+      editable,
+      text: handle(text),
+      placeholder: handle(el.getAttribute('placeholder') ?? ''),
+      label: handle(labelText),
+      ariaLabel: handle(el.getAttribute('aria-label') ?? ''),
       name: el.getAttribute('name') ?? '',
       href: el.getAttribute('href') ?? '',
       testId: el.getAttribute('data-testid') ?? el.getAttribute('data-test-id') ?? ''

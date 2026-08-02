@@ -473,7 +473,7 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
       await page.waitForTimeout(500)
       return
     case 'click':
-      await resolve(page, step.target!).click({ timeout })
+      await clickResiliently(page, step.target!, timeout)
       await page.waitForTimeout(700)
       return
     case 'fill':
@@ -506,7 +506,44 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
   }
 }
 
-/** `text=`, `role=`, or raw CSS/XPath selector. */
+/**
+ * Text selectors match the deepest node containing the text, which in a
+ * component library is usually a decorative <span> inside the real control.
+ * Playwright then waits for that span to become "stable and enabled" and times
+ * out even though the button beside it is perfectly clickable. So: try the
+ * match, then its nearest clickable ancestor, then a forced click.
+ */
+async function clickResiliently(page: Page, target: string, timeout: number): Promise<void> {
+  const primary = resolve(page, target)
+  const half = Math.max(1500, Math.round(timeout / 2))
+
+  try {
+    await primary.click({ timeout: half })
+    return
+  } catch (directError) {
+    // The nearest interactive ancestor is what a user actually clicks.
+    const ancestor = primary.locator('xpath=ancestor-or-self::*[self::a or self::button or self::summary or @role="button" or @role="link" or @role="tab" or @role="menuitem"][1]').first()
+    try {
+      if (await ancestor.count()) {
+        await ancestor.click({ timeout: half })
+        return
+      }
+    } catch {
+      /* fall through to the forced attempt */
+    }
+
+    // Last resort: the element is there but something (an overlay, an
+    // animation that never settles) keeps it from passing the actionability
+    // checks. Dispatching the click still proves whether the handler works.
+    try {
+      await primary.dispatchEvent('click', { timeout: half })
+      return
+    } catch {
+      throw directError
+    }
+  }
+}
+
 function resolve(page: Page, target: string) {
   if (target.startsWith('text=')) return page.getByText(target.slice(5), { exact: false }).first()
   if (target.startsWith('role=')) {

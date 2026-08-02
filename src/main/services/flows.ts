@@ -47,7 +47,11 @@ function handlesOf(c: PageControl): string[] {
 }
 
 function isField(c: PageControl): boolean {
-  return ['input', 'textarea', 'select'].includes(c.tag) && !['submit', 'button', 'reset'].includes(c.type)
+  if (!['input', 'textarea', 'select'].includes(c.tag)) return false
+  if (['submit', 'button', 'reset'].includes(c.type)) return false
+  // Older captures have no `editable` flag; treat them as fillable so existing
+  // runs keep working, but new captures exclude readonly/disabled fields.
+  return c.editable !== false
 }
 
 /**
@@ -132,10 +136,21 @@ export function validateFlow(
       const corpus = step.action === 'fill' ? fieldHandles : allHandles
       const exists = [...corpus].some((h) => h === needle || h.includes(needle) || needle.includes(h))
       if (!exists) {
+        // Distinguish "there is no such field" from "the field is not fillable",
+        // because the fix is different for each.
+        const matchesReadOnly =
+          step.action === 'fill' &&
+          pages
+            .flatMap((p) => p.controls ?? [])
+            .filter((c) => c.editable === false)
+            .flatMap((c) => [c.placeholder, c.label, c.ariaLabel, c.name].filter(Boolean).map(norm))
+            .some((h) => h === needle || h.includes(needle) || needle.includes(h))
         problems.push(
-          step.action === 'fill'
-            ? `no input/textarea/select matching "${target}" exists on any crawled page`
-            : `no control matching "${target}" exists on any crawled page`
+          matchesReadOnly
+            ? `"${target}" is a readonly/disabled field and cannot be filled`
+            : step.action === 'fill'
+              ? `no editable input/textarea/select matching "${target}" exists on any crawled page`
+              : `no control matching "${target}" exists on any crawled page`
         )
       }
       continue

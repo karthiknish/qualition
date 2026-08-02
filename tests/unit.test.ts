@@ -527,6 +527,69 @@ test('flows are derived from the crawl when none are supplied and AI is off', ()
   )
 })
 
+test('readonly fields are rejected as fill targets', () => {
+  // Real failure: `fill label=Email address` resolved to
+  // <input readonly aria-disabled="true"> and timed out after 6s.
+  const settings = page({
+    url: 'https://tool.internal/settings',
+    controls: [
+      { tag: 'input', type: 'text', role: '', editable: false, text: '', placeholder: '',
+        label: 'Email address', ariaLabel: '', name: 'email', href: '', testId: '' },
+      { tag: 'input', type: 'text', role: '', editable: true, text: '', placeholder: 'Display name',
+        label: '', ariaLabel: '', name: 'nickname', href: '', testId: '' }
+    ],
+    sections: [
+      { id: 's1', role: 'form', roleConfidence: 1, label: 'Settings', selector: 'main',
+        rect: { x: 0, y: 0, width: 1440, height: 800 }, textPreview: 'Safety', headings: ['Settings'],
+        ctaLabels: [], components: [],
+        stats: { interactiveCount: 2, imageCount: 0, textDensity: 1, distinctBgColors: 1, distinctFontSizes: 2, maxTextWidthPx: 400 } }
+    ]
+  })
+
+  const readonlyFill = validateFlow(
+    { name: 'Update settings details', steps: [
+      { action: 'goto', target: '/settings' },
+      { action: 'fill', target: 'label=Email address', value: 'qualition+test@example.com' }
+    ] },
+    [settings]
+  )
+  assert.ok(readonlyFill.invalid, 'a readonly field must not be proposed as a fill target')
+  assert.match(readonlyFill.invalid!, /readonly|disabled/i)
+
+  // The genuinely editable field still validates.
+  const ok = validateFlow(
+    { name: 'Rename', steps: [
+      { action: 'goto', target: '/settings' },
+      { action: 'fill', target: 'placeholder=Display name', value: 'QA' }
+    ] },
+    [settings]
+  )
+  assert.equal(ok.invalid, undefined, `editable field must pass, got: ${ok.invalid}`)
+})
+
+test('control handles are captured verbatim, never truncated with an ellipsis', () => {
+  // Real failure: the inventory stored a clamped placeholder
+  // 'Try “email”, “eve”, “research…' so the flow searched for text that does
+  // not exist on the page. A handle used as a selector must be exact.
+  const long = 'Search workflows, agents, runs and every other long placeholder string here'
+  const p = page({
+    url: 'https://tool.internal/',
+    controls: [
+      { tag: 'input', type: 'text', role: '', editable: true, text: '', placeholder: long,
+        label: '', ariaLabel: '', name: 'q', href: '', testId: '' }
+    ]
+  })
+  const inv = flowInventory([p])
+  assert.ok(inv.includes(long), 'the full placeholder must appear in the inventory')
+  assert.ok(!/…/.test(inv), `inventory must not contain ellipsis-truncated handles: ${inv}`)
+
+  // And a flow using the exact string validates.
+  assert.equal(
+    validateFlow({ name: 'Search', steps: [{ action: 'fill', target: `placeholder=${long}`, value: 'x' }] }, [p]).invalid,
+    undefined
+  )
+})
+
 test('invented flows are rejected before they can produce false failures', () => {
   // A real internal tool: one route, one button, no marketing pages.
   const app = page({
