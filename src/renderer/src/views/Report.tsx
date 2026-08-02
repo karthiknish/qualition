@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CapturedPage, Finding, Run, RunProgress, Severity } from '../../../shared/types'
 import { api, CATEGORY_LABEL, cx, gradeColor, SEVERITY_COLOR } from '../lib/api'
 import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
@@ -205,8 +206,10 @@ const PROMPT_SCOPES: { id: 'all' | 'critical' | 'accessibility' | 'coherence'; l
  * Copies a paste-ready brief for an AI coding chat: measured evidence, required
  * fixes, component swaps and explicit "do not redesign the rest" constraints.
  *
- * Menu is `position: fixed` (not absolute) so sticky Report tabs — which create
- * a higher stacking context — cannot paint over it.
+ * Menu is portaled to document.body. The Report header uses `animate-fade-up`
+ * (`animation-fill-mode: both` + transform), which makes `position: fixed`
+ * descendants resolve against the header — so sticky tabs (z-10 sibling)
+ * paint over any in-tree "fixed" menu no matter how high its z-index.
  */
 function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: string; sectionId?: string; label?: string }): JSX.Element {
   const [open, setOpen] = useState(false)
@@ -281,33 +284,36 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
       >
         {copied ?? label}
       </Button>
-      {open && menuPos && (
-        <>
-          <div className="fixed inset-0 z-[80]" onClick={() => setOpen(false)} />
-          <div
-            role="menu"
-            aria-label="Copy fix prompt scope"
-            className="fixed z-[90] w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60"
-            style={{ top: menuPos.top, right: menuPos.right }}
-          >
-            {PROMPT_SCOPES.map((s) => (
-              <button
-                key={s.id}
-                role="menuitem"
-                onClick={() => copy(s.id)}
-                className="block w-full px-3 py-2 text-left hover:bg-zinc-800"
-              >
-                <span className="block text-[12px] text-zinc-100">{s.label}</span>
-                <span className="block text-[10px] text-zinc-500">{s.hint}</span>
-              </button>
-            ))}
-            <p className="border-t border-zinc-800 px-3 py-2 text-[10px] leading-snug text-zinc-600">
-              Paste into Claude, Cursor or ChatGPT. Includes measured evidence, required fixes, component add-commands
-              and a rule not to redesign anything else.
-            </p>
-          </div>
-        </>
-      )}
+      {open &&
+        menuPos &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[200]" onClick={() => setOpen(false)} />
+            <div
+              role="menu"
+              aria-label="Copy fix prompt scope"
+              className="fixed z-[210] w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60"
+              style={{ top: menuPos.top, right: menuPos.right }}
+            >
+              {PROMPT_SCOPES.map((s) => (
+                <button
+                  key={s.id}
+                  role="menuitem"
+                  onClick={() => copy(s.id)}
+                  className="block w-full px-3 py-2 text-left hover:bg-zinc-800"
+                >
+                  <span className="block text-[12px] text-zinc-100">{s.label}</span>
+                  <span className="block text-[10px] text-zinc-500">{s.hint}</span>
+                </button>
+              ))}
+              <p className="border-t border-zinc-800 px-3 py-2 text-[10px] leading-snug text-zinc-600">
+                Paste into Claude, Cursor or ChatGPT. Includes measured evidence, required fixes, component add-commands
+                and a rule not to redesign anything else.
+              </p>
+            </div>
+          </>,
+          document.body
+        )}
     </div>
   )
 }
