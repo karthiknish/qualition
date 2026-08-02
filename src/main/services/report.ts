@@ -54,6 +54,32 @@ export function renderMarkdownReport(run: Run): string {
     lines.push('')
   }
 
+  if (run.lighthouse) {
+    const s = run.lighthouse
+    const pct = (n: number | null): string => (n == null ? '—' : String(Math.round(n * 100)))
+    lines.push('## Lighthouse')
+    lines.push('')
+    lines.push(`| Perf | A11y | Best practices | SEO |`)
+    lines.push(`| ---: | ---: | ---: | ---: |`)
+    lines.push(`| ${pct(s.performance)} | ${pct(s.accessibility)} | ${pct(s.bestPractices)} | ${pct(s.seo)} |`)
+    lines.push('')
+  }
+
+  const withTokens = run.pages.filter((p) => p.tokenDictionary && p.tokenDictionary.count > 0)
+  if (withTokens.length) {
+    lines.push('## Design tokens (Style Dictionary)')
+    lines.push('')
+    lines.push('| Page | Tokens | Colours | Spacing | Type | Radii | Shadows |')
+    lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
+    for (const p of withTokens) {
+      const t = p.tokenDictionary!
+      lines.push(
+        `| ${new URL(p.url).pathname || '/'} | ${t.count} | ${t.groups.colors} | ${t.groups.spacing} | ${t.groups.typography} | ${t.groups.radii} | ${t.groups.shadows} |`
+      )
+    }
+    lines.push('')
+  }
+
   if (run.visualDiffs?.length) {
     lines.push('## Visual regression')
     lines.push('')

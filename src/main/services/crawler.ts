@@ -8,6 +8,7 @@ import AxeBuilder from '@axe-core/playwright'
 import { join } from 'node:path'
 import { extractFn, observerInit } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
+import { buildTokenDictionary } from './tokens.js'
 import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
 import type {
   AxeViolation,
@@ -15,6 +16,7 @@ import type {
   FlowResult,
   FlowStep,
   PageSection,
+  TokenDictionary,
   Viewport
 } from '../../shared/types.js'
 
@@ -142,6 +144,7 @@ export async function capturePage(
   let extracted: any = null
   let axe: AxeViolation[] = []
   let cssStats: CapturedPage['cssStats'] = null
+  let tokenDictionary: TokenDictionary | null = null
   let status = 0
   let ok = true
   let errorText: string | undefined
@@ -246,6 +249,12 @@ export async function capturePage(
             }
           }
           cssStats = analyzeCss(cssText, data.css?.sheetCount ?? 0)
+          try {
+            const slugTok = slug.replace(/_+/g, '-').slice(0, 40) || 'page'
+            tokenDictionary = await buildTokenDictionary(cssText, opts.outDir, slugTok)
+          } catch (e) {
+            opts.onLog?.(`token extract failed on ${url}: ${(e as Error).message}`)
+          }
         } catch (e) {
           opts.onLog?.(`css analysis failed on ${url}: ${(e as Error).message}`)
         }
@@ -294,6 +303,7 @@ export async function capturePage(
     },
     axe,
     cssStats,
+    tokenDictionary,
     metrics: {
       ttfbMs: perf.ttfbMs ?? 0,
       domContentLoadedMs: perf.domContentLoadedMs ?? 0,

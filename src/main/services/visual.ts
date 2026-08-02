@@ -1,9 +1,10 @@
 /**
  * Visual regression between runs.
  *
- * The audit tells you how good the UI is today; this tells you what changed
- * since the last audit of the same URL. pixelmatch (mapbox) over pngjs, with
- * anti-alias tolerance, writing a diff PNG per changed viewport.
+ * Prefer odiff (native SIMD) for speed and anti-alias awareness; fall back to
+ * pixelmatch when the binary is unavailable. Full-page shots often differ in
+ * height — we compare the overlapping region and count the height delta as
+ * changed area so a one-line content change does not report 0%.
  */
 import pixelmatch from 'pixelmatch'
 import { PNG } from 'pngjs'
@@ -19,8 +20,44 @@ async function readPng(path: string): Promise<PNG | null> {
   }
 }
 
-/** Compare two full-page screenshots, tolerating different page heights. */
-export async function diffScreenshots(
+async function diffWithOdiff(
+  baselinePath: string,
+  currentPath: string,
+  diffPath: string
+): Promise<{ changedRatio: number; changedPixels: number; diffImage?: string } | null> {
+  try {
+    const { compare } = await import('odiff-bin')
+    const result = await compare(baselinePath, currentPath, diffPath, {
+      threshold: 0.12,
+      antialiasing: true,
+      // Full-page shots often differ in height; still compare overlapping pixels
+      // instead of immediately falling back (docs: failOnLayoutDiff default true).
+      failOnLayoutDiff: false,
+      noFailOnFsErrors: true
+    })
+    if (result.match) {
+      return { changedRatio: 0, changedPixels: 0 }
+    }
+    if (result.reason === 'file-not-exists') return null
+    if (result.reason === 'layout-diff') {
+      // Should be rare with failOnLayoutDiff:false; fall through to pixelmatch crop.
+      return null
+    }
+    if (result.reason !== 'pixel-diff') return null
+
+    const changedPixels = Number(result.diffCount ?? 0)
+    const pct = Number(result.diffPercentage ?? 0) / 100
+    return {
+      changedRatio: Number.isFinite(pct) ? pct : 0,
+      changedPixels,
+      diffImage: changedPixels > 0 ? diffPath : undefined
+    }
+  } catch {
+    return null
+  }
+}
+
+async function diffWithPixelmatch(
   baselinePath: string,
   currentPath: string,
   diffPath: string
@@ -28,8 +65,6 @@ export async function diffScreenshots(
   const [a, b] = await Promise.all([readPng(baselinePath), readPng(currentPath)])
   if (!a || !b) return null
 
-  // Full-page shots differ in height whenever content changes; compare the
-  // overlapping region and count the height delta as changed area.
   const width = Math.min(a.width, b.width)
   const height = Math.min(a.height, b.height)
   if (width < 8 || height < 8) return null
@@ -59,6 +94,18 @@ export async function diffScreenshots(
     diffImage = diffPath
   }
   return { changedRatio, changedPixels, diffImage }
+}
+
+/** Compare two full-page screenshots, tolerating different page heights. */
+export async function diffScreenshots(
+  baselinePath: string,
+  currentPath: string,
+  diffPath: string
+): Promise<{ changedRatio: number; changedPixels: number; diffImage?: string } | null> {
+  // odiff first — orders of magnitude faster on large screenshots.
+  const odiff = await diffWithOdiff(baselinePath, currentPath, diffPath)
+  if (odiff) return odiff
+  return diffWithPixelmatch(baselinePath, currentPath, diffPath)
 }
 
 /**

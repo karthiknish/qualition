@@ -237,6 +237,38 @@ function Overview({ run }: { run: Run }): JSX.Element {
       </Panel>
 
       <div className="col-span-2 space-y-4">
+        {run.lighthouse && (
+          <Panel title="Lighthouse">
+            <div className="grid grid-cols-4 gap-3">
+              {(
+                [
+                  ['Perf', run.lighthouse.performance],
+                  ['A11y', run.lighthouse.accessibility],
+                  ['Best practices', run.lighthouse.bestPractices],
+                  ['SEO', run.lighthouse.seo]
+                ] as const
+              ).map(([label, score]) => (
+                <div key={label}>
+                  <div className="text-[10px] uppercase tracking-wide text-zinc-500">{label}</div>
+                  <div
+                    className={cx(
+                      'mt-1 text-2xl tabular-nums font-semibold',
+                      score == null
+                        ? 'text-zinc-600'
+                        : score >= 0.9
+                          ? 'text-emerald-400'
+                          : score >= 0.5
+                            ? 'text-amber-400'
+                            : 'text-red-400'
+                    )}
+                  >
+                    {score == null ? '—' : Math.round(score * 100)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Panel>
+        )}
         {run.geminiNotes && (
           <Panel title="Executive read · Gemini">
             <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-200">{run.geminiNotes}</p>
@@ -512,6 +544,21 @@ function Tokens({ page }: { page: CapturedPage }): JSX.Element {
               sub="maintainability / complexity"
               bad={page.cssStats.quality.maintainability < 70}
             />
+          </div>
+          {page.cssStats.locations?.length > 0 && (
+            <p className="mt-3 text-[11px] text-zinc-500">
+              css-tree located {page.cssStats.locations.length} issue site(s) — cited on coherence findings.
+            </p>
+          )}
+        </Panel>
+      )}
+      {page.tokenDictionary && page.tokenDictionary.count > 0 && (
+        <Panel title="Design tokens · Style Dictionary" className="col-span-2">
+          <div className="grid grid-cols-4 gap-3 text-[12px]">
+            <Stat label="tokens" value={String(page.tokenDictionary.count)} sub={page.tokenDictionary.buildError ? 'build failed' : 'extracted'} bad={!!page.tokenDictionary.buildError} />
+            <Stat label="colours" value={String(page.tokenDictionary.groups.colors)} sub="--color-* family" />
+            <Stat label="spacing" value={String(page.tokenDictionary.groups.spacing)} sub="space / gap / pad" />
+            <Stat label="type / radii / shadows" value={`${page.tokenDictionary.groups.typography} / ${page.tokenDictionary.groups.radii} / ${page.tokenDictionary.groups.shadows}`} sub="grouped" />
           </div>
         </Panel>
       )}

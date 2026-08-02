@@ -11,6 +11,7 @@
  */
 import { analyze } from '@projectwallace/css-analyzer'
 import { calculate } from '@projectwallace/css-code-quality'
+import { formatLocations, locateCssIssues } from './cssLocations.js'
 import type {
   CapturedPage,
   Category,
@@ -102,7 +103,8 @@ export function analyzeCss(css: string, sheets: number): CssStats | null {
     customPropsUnused: Array.isArray(custom.unused) ? custom.unused.length : 0,
     mediaQueries: num(a.atrules?.media?.total),
     quality,
-    qualityViolations
+    qualityViolations,
+    locations: locateCssIssues(css)
   }
 }
 
@@ -113,18 +115,20 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
 
   if (stats.importantRatio > 0.03) {
     const pct = (stats.importantRatio * 100).toFixed(1)
+    const where = formatLocations(stats.locations, 'important')
     out.push(
       mk(page, 'coherence', stats.importantRatio > 0.08 ? 'major' : 'minor',
         `${pct}% of declarations use !important`,
-        `${stats.rules} rules, ${stats.selectors} selectors. Healthy stylesheets sit under 3%; above that the cascade is being fought rather than designed.`,
+        `${stats.rules} rules, ${stats.selectors} selectors. Healthy stylesheets sit under 3%; above that the cascade is being fought rather than designed.${where ? `\n${where}` : ''}`,
         'Delete !important and fix the specificity that made it necessary — usually an over-qualified selector or a global reset.')
     )
   }
   if (stats.idSelectorRatio > 0.02) {
+    const where = formatLocations(stats.locations, 'id-selector')
     out.push(
       mk(page, 'coherence', 'minor',
         `${(stats.idSelectorRatio * 100).toFixed(1)}% of selectors use IDs`,
-        `Max specificity in the sheet is (${stats.maxSpecificity}). ID selectors cannot be overridden by component classes, so they force !important downstream.`,
+        `Max specificity in the sheet is (${stats.maxSpecificity}). ID selectors cannot be overridden by component classes, so they force !important downstream.${where ? `\n${where}` : ''}`,
         'Swap ID selectors for class or data-attribute hooks.')
     )
   }
@@ -173,10 +177,11 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
     )
   }
   if (stats.zIndexUnique > 8 || stats.zIndexMax >= 1000) {
+    const where = formatLocations(stats.locations, 'high-z')
     out.push(
       mk(page, 'craft', stats.zIndexMax >= 9999 ? 'major' : 'minor',
         `z-index sprawl: ${stats.zIndexUnique} unique values, max ${stats.zIndexMax}`,
-        'Ad-hoc stacking values are a stacking-context bug waiting to happen (and the reason modals hide behind headers).',
+        `Ad-hoc stacking values are a stacking-context bug waiting to happen (and the reason modals hide behind headers).${where ? `\n${where}` : ''}`,
         'Define a named layer scale (base/dropdown/sticky/overlay/modal/toast) and forbid raw numbers.')
     )
   }

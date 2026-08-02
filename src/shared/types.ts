@@ -35,7 +35,7 @@ export interface Finding {
   viewport?: string
   selector?: string
   evidence?: string[]
-  source: 'heuristic' | 'axe' | 'ai'
+  source: 'heuristic' | 'axe' | 'ai' | 'lighthouse' | 'pa11y'
 }
 
 export interface SectionComponent {
@@ -95,6 +95,33 @@ export interface DesignTokens {
   transitions: { value: string; usage: number }[]
 }
 
+/** A pinpoint inside concatenated authored CSS (css-tree positions). */
+export interface CssLocation {
+  reason: 'important' | 'id-selector' | 'high-z' | 'vendor-prefix'
+  line: number
+  column: number
+  property?: string
+  selector?: string
+  value?: string
+}
+
+/** Style Dictionary–shaped token inventory extracted from authored CSS. */
+export interface TokenDictionary {
+  tokens: Record<string, unknown>
+  count: number
+  groups: {
+    colors: number
+    spacing: number
+    typography: number
+    radii: number
+    shadows: number
+    other: number
+  }
+  file?: string
+  builtCss?: string
+  buildError?: string
+}
+
 /** Authored-CSS metrics produced by @projectwallace/css-analyzer. */
 export interface CssStats {
   bytes: number
@@ -120,6 +147,8 @@ export interface CssStats {
   mediaQueries: number
   quality: { performance: number; maintainability: number; complexity: number }
   qualityViolations: { id: string; score: number; value: unknown }[]
+  /** css-tree source locations for the issues we care about. */
+  locations: CssLocation[]
 }
 
 export interface AxeViolation {
@@ -153,6 +182,8 @@ export interface CapturedPage {
   axe: AxeViolation[]
   /** Authored-CSS metrics (Project Wallace); null when no CSS could be read. */
   cssStats: CssStats | null
+  /** Style Dictionary token tree extracted from authored CSS custom properties. */
+  tokenDictionary?: TokenDictionary | null
   metrics: PageMetrics
   consoleErrors: string[]
   networkFailures: { url: string; status: number | string }[]
@@ -382,6 +413,13 @@ export interface Run {
   archetype?: { archetype: 'app' | 'marketing' | 'docs' | 'commerce'; confidence: number; signals: string[] }
   themeSummary?: string
   geminiNotes?: string
+  /** Lighthouse category scores (0–1), when the pass ran. */
+  lighthouse?: {
+    performance: number | null
+    accessibility: number | null
+    bestPractices: number | null
+    seo: number | null
+  }
   error?: string
   log: { ts: number; level: 'info' | 'warn' | 'error'; msg: string }[]
 }

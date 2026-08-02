@@ -197,6 +197,46 @@ test('auditCss reports z-index sprawl and !important abuse', () => {
   const findings = auditCss(page(), stats, config)
   assert.ok(findings.some((f) => /z-index sprawl/.test(f.title)))
   assert.ok(findings.some((f) => /!important/.test(f.title)))
+  assert.ok(findings.some((f) => /Locations:/.test(f.detail)), 'css-tree locations should be cited')
+})
+
+/* --------------------------- css-tree + tokens ---------------------------- */
+
+test('locateCssIssues pinpoints !important and high z-index', async () => {
+  const { locateCssIssues } = await import('../src/main/services/cssLocations.js')
+  const locs = locateCssIssues(`
+    #main { color: red; }
+    .x { z-index: 9999; color: blue !important; }
+  `)
+  assert.ok(locs.some((l) => l.reason === 'important' && l.line >= 1))
+  assert.ok(locs.some((l) => l.reason === 'high-z'))
+  assert.ok(locs.some((l) => l.reason === 'id-selector'))
+})
+
+test('extractTokenTree + Style Dictionary build round-trips custom props', async () => {
+  const { extractTokenTree, buildTokenDictionary, auditTokens } = await import('../src/main/services/tokens.js')
+  const css = `
+    :root {
+      --color-brand: #5433fd;
+      --color-text: #111111;
+      --space-sm: 8px;
+      --space-md: 16px;
+      --radius-sm: 4px;
+      --font-sans: Inter, sans-serif;
+    }
+    .a { color: var(--color-brand); }
+  `
+  const { flat, tokens } = extractTokenTree(css)
+  assert.ok(flat.length >= 6)
+  assert.ok(tokens.color?.brand || tokens.color)
+  const dir = await mkdtemp(join(tmpdir(), 'qtok-'))
+  const dict = await buildTokenDictionary(css, dir, 'demo')
+  assert.ok(dict)
+  assert.ok(dict!.count >= 6)
+  assert.ok(dict!.file)
+  assert.ok(!dict!.buildError, dict!.buildError)
+  const findings = auditTokens(page(), dict, { ...config, brutality: 'ruthless' })
+  assert.ok(findings.some((f) => /Style Dictionary built/.test(f.title)))
 })
 
 /* ---------------------------- visual regression --------------------------- */

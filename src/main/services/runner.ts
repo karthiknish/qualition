@@ -17,7 +17,10 @@ import { detectArchetype, queryForFlows, queryForSection, refineRoles } from './
 import { closeShoogle } from './shoogle.js'
 import { recommendForSection } from './shadcnRegistry.js'
 import { auditCss } from './cssAudit.js'
+import { auditTokens } from './tokens.js'
 import { compareWithBaseline } from './visual.js'
+import { runLighthouse } from './lighthouse.js'
+import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
@@ -257,10 +260,47 @@ export async function executeRun(
       findings.push(...auditPage(page, cfg))
       // Authored-CSS evidence (Project Wallace) on top of the DOM sample.
       if (page.cssStats) findings.push(...auditCss(page, page.cssStats, cfg))
+      if (page.tokenDictionary) findings.push(...auditTokens(page, page.tokenDictionary, cfg))
     }
     run.findings = findings
     run.themeSummary = themeSummary(run.pages)
     progress('heuristics', 36, `${findings.length} heuristic finding(s) · ${run.themeSummary}`)
+    await saveRun(run)
+
+    /* 2a. Lighthouse + pa11y — independent Chrome passes, soft-fail */
+    try {
+      checkpoint()
+      progress('lighthouse', 38, 'Running Lighthouse (perf / a11y / best-practices / SEO)')
+      const primary = run.pages[0]?.url ?? cfg.targetUrl
+      const lh = await raceCancel(
+        runLighthouse(primary, { storageStatePath: storageState, onLog: (m) => log('info', m) })
+      )
+      if (lh) {
+        run.lighthouse = lh.scores
+        run.findings.push(...lh.findings)
+      }
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError') throw e
+      log('warn', `Lighthouse failed: ${(e as Error).message}`)
+    }
+
+    try {
+      checkpoint()
+      progress('pa11y', 40, 'Running pa11y (HTML_CodeSniffer)')
+      const primary = run.pages[0]?.url ?? cfg.targetUrl
+      const knownAxeIds = new Set(run.pages.flatMap((p) => p.axe.map((v) => v.id)))
+      const p11y = await raceCancel(
+        runPa11y(primary, {
+          storageStatePath: storageState,
+          knownAxeIds,
+          onLog: (m) => log('info', m)
+        })
+      )
+      if (p11y) run.findings.push(...p11y.findings)
+    } catch (e) {
+      if ((e as Error).name === 'CancelledError') throw e
+      log('warn', `pa11y failed: ${(e as Error).message}`)
+    }
     await saveRun(run)
 
     /* 2b. visual regression against the previous audit of the same target */
@@ -563,6 +603,7 @@ export async function executeRun(
           try {
             run.findings.push(...auditPage(page, cfg))
             if (page.cssStats) run.findings.push(...auditCss(page, page.cssStats, cfg))
+            if (page.tokenDictionary) run.findings.push(...auditTokens(page, page.tokenDictionary, cfg))
           } catch {
             /* partial page data */
           }

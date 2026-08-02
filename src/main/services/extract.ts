@@ -40,6 +40,19 @@ export const extractFn = function (): any {
     return cs.display !== 'none' && cs.visibility !== 'hidden' && Number(cs.opacity) > 0.05
   }
 
+  // Design-system shells (Astryx et al.) wrap the tree in `display: contents`
+  // nodes. Those paint through their children but report a 0×0 box, so a naive
+  // visibility check drops the entire app and descent dies at `#root`.
+  const isContents = (el: Element): boolean => getComputedStyle(el).display === 'contents'
+  const flatChildren = (el: Element): Element[] => {
+    const out: Element[] = []
+    for (const c of Array.from(el.children)) {
+      if (isContents(c)) out.push(...flatChildren(c))
+      else out.push(c)
+    }
+    return out
+  }
+
   /* ------------------------------ tokens ------------------------------- */
   const colorBg = new Map<string, number>()
   const colorText = new Map<string, number>()
@@ -200,58 +213,97 @@ export const extractFn = function (): any {
   ).filter(hasSubstance)
   for (const r of roots) candidates.push(r)
 
-  // SPA fallback: no <section> markup anywhere. Find the densest content
-  // container on the page and split *that*, instead of walking arbitrary
-  // top-level divs (which lands on toast/portal roots).
-  // Count only content roots: header + one root + footer reached the old
-  // threshold of 3 and skipped the descent, which is why app screens came back
-  // as a single section.
-  if (roots.length < 2) {
-    const main = document.querySelector('main, [role=main], #root, #app, [data-app]') ?? document.body
-    // Descend only while a single child holds the content. Stop at the first
-    // node that has two or more substantial children - that node is the row of
-    // sections. The previous loop kept descending past it to the densest leaf,
-    // which by definition had nothing left to split, so the whole screen came
-    // back as one section.
-    let best: Element = main
-    for (let depth = 0; depth < 30; depth++) {
-      const kids = Array.from(best.children).filter((c) => isVisible(c) && hasSubstance(c))
-      if (kids.length === 1 && kids[0].getBoundingClientRect().height > 160) {
+  const substantialKids = (el: Element): Element[] =>
+    flatChildren(el).filter((c) => isVisible(c) && hasSubstance(c))
+  // Thin chrome (top bars, toolbars) is not a section row. Keep descending
+  // past "topbar + fill" so we reach the scrollable stack of real bands.
+  const contentKids = (el: Element): Element[] => {
+    const kids = substantialKids(el)
+    const ph = Math.max(el.getBoundingClientRect().height, 1)
+    return kids.filter((k) => {
+      const h = k.getBoundingClientRect().height
+      return h > 100 && h > ph * 0.12
+    })
+  }
+  const descendToBands = (start: Element): Element[] => {
+    let best: Element = start
+    for (let depth = 0; depth < 40; depth++) {
+      const kids = contentKids(best)
+      if (kids.length === 1) {
         best = kids[0]
         continue
       }
       break
     }
+    return substantialKids(best)
+  }
 
-    // Split the densest container into its meaningful children.
-    const blocks = Array.from(best.children).filter((c) => isVisible(c) && hasSubstance(c))
+  // SPA fallback: no real section markup — or the only "roots" are viewport-
+  // filling shells (`[role=main] > *` matching one 900px stack). Descend into
+  // the shell and split the scrollable band stack.
+  // Prefer real landmarks over `#root`. `querySelector('main, #root, …')` is
+  // document-order, so `#root` wins even when `[role=main]` exists deeper —
+  // and `#root`'s only child is often `display: contents`.
+  const vh = window.innerHeight
+  const realRoots = roots.filter((r) => r.getBoundingClientRect().height < vh * 0.85)
+  if (realRoots.length < 2) {
+    const pickMain = (): Element => {
+      for (const sel of ['main', '[role=main]', '[data-app]', '#app', '#root']) {
+        const el = document.querySelector(sel)
+        if (el) return el
+      }
+      return document.body
+    }
+
+    const bestStart = pickMain()
+    const blocks = descendToBands(bestStart)
     if (blocks.length >= 2) {
       for (const b of blocks) candidates.push(b)
-    } else if (best.querySelectorAll('h1,h2,h3,[role=heading]').length >= 2) {
+    } else if (bestStart.querySelectorAll('h1,h2,h3,[role=heading]').length >= 2) {
       // One container holding the whole screen is not a section. Slice it at
       // heading boundaries so each labelled area becomes its own section -
       // otherwise every page reports a single 's1' and the per-section
       // references, component picks and critique all collapse onto it.
+      let best: Element = bestStart
+      for (let depth = 0; depth < 40; depth++) {
+        const kids = contentKids(best)
+        if (kids.length === 1) {
+          best = kids[0]
+          continue
+        }
+        break
+      }
       const heads = Array.from(best.querySelectorAll('h1,h2,h3,[role=heading]')).filter(isVisible)
-      const blocks = new Set<Element>()
+      const headingBlocks = new Set<Element>()
       for (const h of heads) {
         let block: Element | null = h
         // Climb to the block that owns this heading but not the whole screen.
-        while (block?.parentElement && block.parentElement !== best && block.parentElement.children.length < 2) {
-          block = block.parentElement
+        // Pierce display:contents so every heading does not collapse onto the
+        // same zero-box wrapper under `#root`.
+        while (block?.parentElement && block.parentElement !== best) {
+          const parent: Element = block.parentElement
+          if (isContents(parent) || parent.children.length < 2) {
+            block = parent
+            continue
+          }
+          break
         }
         while (block && block.parentElement && block.parentElement !== best) block = block.parentElement
-        if (block && isVisible(block) && hasSubstance(block)) blocks.add(block)
+        if (block && isVisible(block) && hasSubstance(block)) headingBlocks.add(block)
       }
-      if (blocks.size >= 2) for (const b of blocks) candidates.push(b)
+      if (headingBlocks.size >= 2) for (const b of headingBlocks) candidates.push(b)
       else candidates.push(best)
     } else {
-      candidates.push(best)
-      // Also surface obvious app landmarks so a shell is not one blob.
-      for (const el of Array.from(document.querySelectorAll('aside, nav, [role=navigation], [role=complementary], [role=dialog]'))) {
-        if (isVisible(el) && hasSubstance(el)) candidates.push(el)
-      }
+      candidates.push(bestStart)
     }
+  }
+
+  // App chrome is a section of its own — always surface it, not only when the
+  // content split failed. Otherwise a sidebar+main shell reports as one blob.
+  for (const el of Array.from(
+    document.querySelectorAll('aside, nav, [role=navigation], [role=complementary]')
+  )) {
+    if (isVisible(el) && hasSubstance(el) && !candidates.includes(el)) candidates.push(el)
   }
 
   const footer = document.querySelector('footer, [role=contentinfo]')
@@ -259,24 +311,36 @@ export const extractFn = function (): any {
 
   // Split any candidate that is really a wrapper around several bands, so a
   // single <main> does not become one 1700px "hero".
-  const vh = window.innerHeight
+  // App shells are ~viewport tall with overflow inside — use scrollHeight too,
+  // otherwise a 900px shell never crosses the old 1.35×vh gate and never splits.
   const splitOnce = (list: Element[]): { out: Element[]; changed: boolean } => {
     const out: Element[] = []
     let changed = false
     for (const el of list) {
       const h = el.getBoundingClientRect().height
+      const sh = (el as HTMLElement).scrollHeight || h
       const isLandmark = /^(header|footer|nav)$/.test(el.tagName.toLowerCase())
-      if (!isLandmark && h > vh * 1.35) {
-        const kids = Array.from(el.children).filter((k) => {
+      const overflow = sh > vh * 1.15 || h > vh * 1.35
+      const viewportShell = h > vh * 0.85
+      if (!isLandmark && (overflow || viewportShell)) {
+        // Prefer deep band split (pierces chrome + display:contents) over a
+        // shallow topbar/fill split that leaves the page as one content blob.
+        const deep = descendToBands(el)
+        if (deep.length >= 2 && !deep.every((d) => d === el)) {
+          out.push(...deep)
+          changed = true
+          continue
+        }
+        const kids = substantialKids(el).filter((k) => {
           const r = k.getBoundingClientRect()
-          return r.height > 120 && r.width > 200 && isVisible(k)
+          return r.height > 80 && r.width > 160
         })
         if (kids.length >= 2) {
           out.push(...kids)
           changed = true
           continue
         }
-        if (kids.length === 1) {
+        if (kids.length === 1 && kids[0] !== el) {
           out.push(kids[0])
           changed = true
           continue
@@ -313,16 +377,32 @@ export const extractFn = function (): any {
     if (seen.has(el) || !isVisible(el)) continue
     const rect = el.getBoundingClientRect()
     const top = rect.top + window.scrollY
-    if (rect.height < 80 || rect.height > docH * 1.2) continue
+    if (rect.height < 56 || rect.height > docH * 1.2) continue
+    // Toasts, FABs and floating popovers are not page sections.
+    const pos = getComputedStyle(el).position
+    if ((pos === 'fixed' || pos === 'absolute') && rect.height < vh * 0.4) continue
     // Empty scaffolding is not a section.
     if (!hasSubstance(el)) continue
-    // Skip if nested inside an already-captured section.
-    if (sections.some((s) => top >= s.rect.y - 4 && top + rect.height <= s.rect.y + s.rect.height + 4))
+    // Skip if nested inside an already-captured section. Must be 2D: a
+    // full-height sidebar shares the same y-span as every main band, so a
+    // vertical-only check would drop the whole page after accepting nav.
+    if (
+      sections.some(
+        (s) =>
+          top >= s.rect.y - 4 &&
+          top + rect.height <= s.rect.y + s.rect.height + 4 &&
+          rect.x >= s.rect.x - 4 &&
+          rect.x + rect.width <= s.rect.x + s.rect.width + 4
+      )
+    )
       continue
     seen.add(el)
 
     const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+    // Ignore headings in hidden popovers/toasts — they steal the section label
+    // (e.g. notifications "Caught up" beating the page H1).
     const headings = Array.from(el.querySelectorAll('h1,h2,h3'))
+      .filter(isVisible)
       .map((h) => (h.textContent ?? '').replace(/\s+/g, ' ').trim())
       .filter(Boolean)
       .slice(0, 6)
