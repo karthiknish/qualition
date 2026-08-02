@@ -1,0 +1,30 @@
+# dependencies
+node_modules
+
+# build output
+out
+dist
+release
+
+# generated bundles from local verification scripts
+.smoke.mjs
+.test.mjs
+.full.mjs
+.crawl.mjs
+.probe.mjs
+.auth.mjs
+.cancel.mjs
+.img.mjs
+.q.mjs
+.comp.mjs
+.e2eauth.mjs
+.e2eleak.mjs
+.mcptest.mjs
+.verify.mjs
+
+# local env / secrets
+.env
+.env.local
+
+# os
+.DS_Store
