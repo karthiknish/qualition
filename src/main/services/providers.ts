@@ -83,6 +83,29 @@ export function extractJson(text: string): any {
   }
 }
 
+/** Hard ceiling for a single model request. */
+export const REQUEST_TIMEOUT_MS = 120_000
+
+/**
+ * Bound one request. `withBackoff` only retries promises that *reject*; a
+ * request that simply never settles would hang the whole run forever, which is
+ * exactly what a stalled vision call did.
+ */
+export async function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    return await Promise.race([
+      p,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+        timer.unref?.()
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 /** Retry transient rate limits / outages with backoff + jitter. */
 export async function withBackoff<T>(label: string, fn: () => Promise<T>, attempts = 4): Promise<T> {
   let lastError: unknown
@@ -92,7 +115,8 @@ export async function withBackoff<T>(label: string, fn: () => Promise<T>, attemp
     } catch (e) {
       lastError = e
       const msg = (e as Error).message ?? ''
-      const retryable = /429|RESOURCE_EXHAUSTED|rate.?limit|503|UNAVAILABLE|500|INTERNAL|overloaded|fetch failed|ECONN|ETIMEDOUT|timeout/i.test(msg)
+      const retryable =
+        /429|RESOURCE_EXHAUSTED|rate.?limit|503|UNAVAILABLE|500|INTERNAL|overloaded|fetch failed|ECONN|ETIMEDOUT|timed out|timeout/i.test(msg)
       if (!retryable || i === attempts - 1) break
       const hinted = /retry(?:Delay|-after)"?[:\s]+"?(\d+)/i.exec(msg)?.[1]
       const waitMs = hinted ? Number(hinted) * 1000 : 1500 * 2 ** i + Math.random() * 700
@@ -179,15 +203,19 @@ class GeminiProvider implements Provider {
       parts.push({ inlineData: { mimeType: enc.mime, data: enc.data } })
     }
     const res = await withBackoff('gemini', () =>
-      this.sdk().models.generateContent({
-        model,
-        contents: [{ role: 'user', parts }],
-        config: {
-          systemInstruction: req.system,
-          temperature: req.temperature ?? 0.4,
-          ...(req.schema ? { responseMimeType: 'application/json', responseSchema: req.schema as any } : {})
-        }
-      })
+      withTimeout(
+        this.sdk().models.generateContent({
+          model,
+          contents: [{ role: 'user', parts }],
+          config: {
+            systemInstruction: req.system,
+            temperature: req.temperature ?? 0.4,
+            ...(req.schema ? { responseMimeType: 'application/json', responseSchema: req.schema as any } : {})
+          }
+        }),
+        REQUEST_TIMEOUT_MS,
+        'gemini request'
+      )
     )
     return res.text ?? ''
   }
@@ -272,11 +300,16 @@ class OpenAiProvider implements Provider {
     }
 
     const text = await withBackoff('openai', async () => {
-      const res = await fetch(`${this.base()}/responses`, {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify(body)
-      })
+      const res = await withTimeout(
+        fetch(`${this.base()}/responses`, {
+          method: 'POST',
+          headers: this.headers(),
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+        }),
+        REQUEST_TIMEOUT_MS,
+        'openai request'
+      )
       const raw = await res.text()
       if (!res.ok) throw new Error(`${res.status} ${raw.slice(0, 300)}`)
       const json = JSON.parse(raw)
@@ -365,7 +398,13 @@ class CursorProvider implements Provider {
       'ask',
       ...(model && model !== 'auto' ? ['--model', model] : [])
     ]
-    const raw = await withBackoff('cursor', () => runCursor(cursorBinary(this.creds), args, prompt, this.env()))
+    const raw = await withBackoff('cursor', () =>
+      withTimeout(
+        runCursor(cursorBinary(this.creds), args, prompt, this.env(), REQUEST_TIMEOUT_MS),
+        REQUEST_TIMEOUT_MS + 5000,
+        'cursor request'
+      )
+    )
     // Headless JSON: {"type":"result","result":"…"} — sometimes preceded by event lines.
     for (const line of raw.split('\n').reverse()) {
       const t = line.trim()

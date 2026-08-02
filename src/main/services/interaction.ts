@@ -306,7 +306,26 @@ export async function probeInteractions(
       deadline.slice(32_000),
       'probe initial navigation'
     )
-    await page.waitForTimeout(1200)
+    // A client-rendered app has an empty DOM at domcontentloaded. Probing then
+    // reports "no interactive controls" on a perfectly good screen, so wait for
+    // the app to actually paint something interactive before inventorying.
+    await soft(
+      page.waitForLoadState('networkidle', { timeout: deadline.slice(8000) }),
+      deadline.slice(9000),
+      'probe networkidle',
+      undefined
+    )
+    await soft(
+      page.waitForFunction(
+        () => document.querySelectorAll('a[href], button, input, select, textarea, [role=button]').length > 0,
+        undefined,
+        { timeout: deadline.slice(8000), polling: 250 }
+      ).then(() => undefined),
+      deadline.slice(9000),
+      'probe hydration wait',
+      undefined
+    )
+    await page.waitForTimeout(600)
 
     const inventory: any = await soft(page.evaluate(collectControls), deadline.slice(20_000), 'collectControls', {
       controls: [],

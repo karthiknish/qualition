@@ -354,9 +354,35 @@ export async function executeRun(
 
     /* 4. AI critique */
     if (aiEnabled) {
-      progress('critique', 58, `Critiquing with ${cfg.provider}/${model}${critic.supportsVision ? '' : ' (text-only)'}`)
-      for (const page of run.pages) {
+      // Each critique is a slow network round trip, so the work has to be
+      // bounded: an "everything" crawl of 24 pages would otherwise queue ~48
+      // sequential requests (tens of minutes) behind a single progress tick.
+      const PAGE_BUDGET = 12
+      const SECTION_BUDGET = 12
+      const ranked = [...run.pages].sort(
+        (a, b) =>
+          run.findings.filter((f) => f.pageUrl === b.url).length -
+          run.findings.filter((f) => f.pageUrl === a.url).length
+      )
+      const targetsForCritique = ranked.slice(0, PAGE_BUDGET)
+      if (ranked.length > PAGE_BUDGET) {
+        log(
+          'info',
+          `Critiquing the ${PAGE_BUDGET} pages with the most findings; skipping ${ranked.length - PAGE_BUDGET} quieter page(s) to keep the run bounded`
+        )
+      }
+      let sectionBudgetLeft = SECTION_BUDGET
+      progress(
+        'critique',
+        58,
+        `Critiquing ${targetsForCritique.length} page(s) with ${cfg.provider}/${model}${critic.supportsVision ? '' : ' (text-only)'}`
+      )
+
+      for (const [index, page] of targetsForCritique.entries()) {
         checkpoint()
+        // 58 -> 74 spread across the pages so the UI never looks frozen.
+        const pct = 58 + Math.round(((index + 1) / targetsForCritique.length) * 14)
+        progress('critique', pct, `Critiquing ${index + 1}/${targetsForCritique.length}: ${new URL(page.url).pathname || '/'}`)
         const interaction = run.interactions.find((i) => i.url === page.url)
         try {
           const res = await raceCancel(critiquePage(critic, model, page, cfg, interaction))
@@ -365,15 +391,17 @@ export async function executeRun(
           log('info', `${cfg.provider}: ${res.findings.length} finding(s) on ${page.url}`)
         } catch (e) {
           if (state.cancelled) throw new CancelledError()
-          log('error', `page critique failed: ${(e as Error).message}`)
+          log('error', `page critique failed on ${page.url}: ${(e as Error).message}`)
         }
         // section-level comparison against references, worst sections first
         const targets = page.sections
           .filter((s) => s.screenshot)
           .sort((a, b) => b.rect.height - a.rect.height)
-          .slice(0, 5)
+          .slice(0, Math.max(0, Math.min(3, sectionBudgetLeft)))
         for (const s of targets) {
           checkpoint()
+          if (sectionBudgetLeft <= 0) break
+          sectionBudgetLeft--
           const refs = run.references.filter((r) => r.sectionId === s.id)
           try {
             run.findings.push(...(await raceCancel(critiqueSectionAgainstReferences(critic, model, page, s, refs, cfg))))
