@@ -253,7 +253,9 @@ export async function capturePage(
         try {
           // Official Deque integration: handles iframes, CSP and version drift.
           const result: any = await new AxeBuilder({ page })
-            .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'best-practice'])
+            // WCAG 2.2 was missing, which silently skipped target-size (2.5.8),
+            // meta-refresh, blink and marquee.
+            .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice'])
             .analyze()
           axe = (result.violations ?? []).map((v: any) => ({
             id: v.id,
