@@ -99,20 +99,54 @@ export const extractFn = function (): any {
   }
 
   /* ----------------------------- sections ------------------------------ */
+  /**
+   * Build tools generate class names that change on every build — CSS modules
+   * (`styles-module__row___a1B2c`), atomic runtimes (`x1o57wo1`),
+   * styled-components (`sc-hKMtZM`), emotion (`css-1a2b3c`), Tailwind
+   * arbitrary values. A selector built from those is worthless in a report:
+   * it cannot be searched for in the codebase and it is stale by the next
+   * deploy. Prefer stable, authored hooks instead.
+   */
+  const isHashedClass = (c: string): boolean =>
+    /^(css-|sc-|jsx-|emotion-|svelte-|_)/.test(c) || // known CSS-in-JS prefixes
+    /__[A-Za-z0-9]{4,}$|___[A-Za-z0-9]{4,}$/.test(c) || // CSS modules suffix hash
+    /^[a-z]{1,2}[0-9a-z]{6,}$/.test(c) || // atomic runtime (x1o57wo1)
+    /^[a-f0-9]{6,}$/i.test(c) || // raw hex hash
+    /\[|\]|\//.test(c) // tailwind arbitrary values / variants
+
+  /** A hook a human can actually grep for. */
+  const stableHandle = (el: Element): string | null => {
+    for (const attr of ['data-testid', 'data-test-id', 'data-test', 'data-component', 'data-qa']) {
+      const v = el.getAttribute(attr)
+      if (v) return `[${attr}="${v}"]`
+    }
+    const role = el.getAttribute('role')
+    if (role) return `[role="${role}"]`
+    const aria = el.getAttribute('aria-label')
+    if (aria && aria.length < 40) return `[aria-label="${aria}"]`
+    return null
+  }
+
   const cssPath = (el: Element): string => {
     const parts: string[] = []
     let cur: Element | null = el
     let depth = 0
     while (cur && cur !== document.body && depth < 5) {
       let part = cur.tagName.toLowerCase()
-      if (cur.id) {
+      if (cur.id && !isHashedClass(cur.id)) {
         part += `#${cur.id}`
+        parts.unshift(part)
+        break
+      }
+      const handle = stableHandle(cur)
+      if (handle) {
+        part += handle
         parts.unshift(part)
         break
       }
       const cls = (cur.getAttribute('class') ?? '')
         .split(/\s+/)
-        .filter((c) => c && !/^(css-|sc-|jsx-)/.test(c) && c.length < 24)
+        .filter((c) => c && !isHashedClass(c) && c.length < 24)
         .slice(0, 2)
       if (cls.length) part += '.' + cls.join('.')
       const parent = cur.parentElement
@@ -124,7 +158,14 @@ export const extractFn = function (): any {
       cur = cur.parentElement
       depth++
     }
-    return parts.join(' > ')
+    const path = parts.join(' > ')
+    // If nothing stable survived, the path is just "div > div > span" — useless
+    // on its own, so anchor it with the element's visible text.
+    if (!/[#.\[]/.test(path)) {
+      const label = (el.textContent ?? '').replace(/\s+/g, ' ').trim().slice(0, 30)
+      if (label) return `${path} — text: "${label}"`
+    }
+    return path
   }
 
   /**

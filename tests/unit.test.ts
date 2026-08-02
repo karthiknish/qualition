@@ -15,6 +15,7 @@ import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services
 import { deleteCredential, listCredentials, originOf, resolveCredential, saveCredential } from '../src/main/services/vault.js'
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
 import { flowInventory, heuristicFlows, validateFlow } from '../src/main/services/flows.js'
+import { sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
 import {
@@ -356,6 +357,32 @@ test('login page guesses cover the common conventions and stay on-origin', () =>
   assert.ok(guesses.some((g) => g.endsWith('/login')))
   assert.ok(guesses.some((g) => g.endsWith('/signin')))
   assert.ok(guesses.every((g) => g.startsWith('https://app.example.com/')))
+})
+
+/* ---------------------------- selector hygiene ---------------------------- */
+
+test('generated class-name hashes are stripped from reported selectors', () => {
+  // Real examples from an audited app: CSS modules and atomic runtimes.
+  // When every hook is generated we keep the raw selector (it still works in
+  // devtools) but label it, so nobody wastes time grepping the codebase for it.
+  for (const hashedOnly of [
+    '.styles-module__buttonWrapper___rBcdv > .styles-module__controlButton___8Q0jc',
+    '.styles-module__buttonWrapper___rBcdv'
+  ]) {
+    assert.match(sanitizeSelector(hashedOnly), /no stable selector/, `must be flagged: ${hashedOnly}`)
+  }
+
+  // Stable, authored hooks survive untouched.
+  assert.equal(sanitizeSelector('nav.site-header > a.logo'), 'nav.site-header > a.logo')
+  assert.equal(sanitizeSelector('[data-testid="submit"]'), '[data-testid="submit"]')
+  assert.equal(sanitizeSelector('#main > button'), '#main > button')
+
+  // Mixed: keep the readable part, drop the noise.
+  const mixed = sanitizeSelector('.falnor-kpi-body.x1vlblms > .astryx-stack.xj1bl4l')
+  assert.match(mixed, /falnor-kpi-body/)
+  assert.match(mixed, /astryx-stack/)
+  assert.ok(!mixed.includes('x1vlblms'), `atomic hash leaked: ${mixed}`)
+  assert.ok(!mixed.includes('xj1bl4l'), `atomic hash leaked: ${mixed}`)
 })
 
 /* ------------------------------- archetype -------------------------------- */

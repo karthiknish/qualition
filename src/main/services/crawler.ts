@@ -18,6 +18,32 @@ import type {
   Viewport
 } from '../../shared/types.js'
 
+/**
+ * axe reports whatever selector uniquely identifies a node, which on a modern
+ * build is a wall of generated hashes
+ * (`.styles-module__row___a1B2c`, `.x1o57wo1`). Those cannot be grepped for and
+ * change every deploy, so strip them and keep only what a human can act on.
+ */
+export function sanitizeSelector(selector: string): string {
+  const hashed = (c: string): boolean =>
+    /^(css-|sc-|jsx-|emotion-|svelte-|_)/.test(c) ||
+    /__[A-Za-z0-9]{4,}$|___[A-Za-z0-9]{4,}$/.test(c) ||
+    /^[a-z]{1,2}[0-9a-z]{6,}$/.test(c) ||
+    /^[a-f0-9]{6,}$/i.test(c)
+
+  const cleaned = selector
+    .split(/\s*>\s*/)
+    .map((step) =>
+      step.replace(/\.((?:\\.|[^.#\[\s])+)/g, (match, cls: string) => (hashed(cls) ? '' : match))
+    )
+    .map((step) => step.trim())
+    .filter(Boolean)
+    .join(' > ')
+
+  // Nothing meaningful left (e.g. "div > div")? Say so rather than pretending.
+  return /[#.\[]/.test(cleaned) ? cleaned : `${cleaned || selector} (no stable selector — generated class names only)`
+}
+
 /** Retry wrapper: transient navigation/network failures should not kill a run. */
 async function withRetry<T>(label: string, attempts: number, fn: () => Promise<T>, onLog?: (m: string) => void): Promise<T> {
   let lastError: unknown
@@ -231,7 +257,7 @@ export async function capturePage(
             help: v.help,
             helpUrl: v.helpUrl,
             nodes: (v.nodes ?? []).slice(0, 5).map((n: any) => ({
-              target: n.target,
+              target: (n.target ?? []).map((t: string) => sanitizeSelector(String(t))),
               failureSummary: (n.failureSummary ?? '').slice(0, 400)
             }))
           }))

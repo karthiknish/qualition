@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import type { IntegrationStatus, ProviderId, ProviderStatus, SavedCredential, Settings } from '../../../shared/types'
+import type {
+  IntegrationStatus,
+  ProviderId,
+  ProviderStatus,
+  SavedCredential,
+  Settings,
+  UpdateStatus
+} from '../../../shared/types'
 import { api, cx } from '../lib/api'
 import { Button, Input, Panel } from '../components/ui'
 
@@ -31,6 +38,9 @@ export default function SettingsView({
   const [regUrl, setRegUrl] = useState('')
   const [creds, setCreds] = useState<SavedCredential[]>([])
   const [encryption, setEncryption] = useState(true)
+  const [version, setVersion] = useState('')
+  const [update, setUpdate] = useState<UpdateStatus | null>(null)
+  const [checking, setChecking] = useState(false)
 
   const refreshModels = useCallback(async (provider: ProviderId) => {
     setLoadingModels(true)
@@ -49,6 +59,9 @@ export default function SettingsView({
     void api.mcpServers().then(setServers)
     void api.listCredentials().then(setCreds)
     void api.encryptionAvailable().then(setEncryption)
+    void api.appVersion().then(setVersion)
+    void api.updateStatus().then(setUpdate)
+    return api.onUpdateStatus(setUpdate)
   }, [refreshModels])
 
   if (!s) return <div className="p-6 text-[13px] text-zinc-500">Loading…</div>
@@ -323,6 +336,39 @@ export default function SettingsView({
         )}
       </Panel>
 
+      <Panel title="Updates">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-[13px] text-zinc-200">Qualition {version || '…'}</p>
+            <p className="mt-0.5 text-[11px] leading-snug text-zinc-500">{describeUpdate(update, checking)}</p>
+          </div>
+          <div className="flex shrink-0 gap-2">
+            {update?.state === 'ready' || update?.state === 'available' ? (
+              <Button variant="primary" onClick={() => void api.installUpdate()}>
+                {update.canSelfInstall ? (update.state === 'ready' ? 'Restart & install' : 'Install') : 'Download'}
+              </Button>
+            ) : null}
+            <Button
+              disabled={checking}
+              onClick={async () => {
+                setChecking(true)
+                try {
+                  setUpdate(await api.checkForUpdates())
+                } finally {
+                  setChecking(false)
+                }
+              }}
+            >
+              {checking ? 'Checking…' : 'Check for updates'}
+            </Button>
+          </div>
+        </div>
+        <p className="mt-2 text-[10px] leading-snug text-zinc-600">
+          Releases come from github.com/karthiknish/qualition. Updates are checked on launch and every 6 hours.
+          {update && update.canSelfInstall === false && ' This build is unsigned, so installing opens the download page.'}
+        </p>
+      </Panel>
+
       <Panel title="Connected services">
         <p className="mb-2 text-[11px] leading-snug text-zinc-500">
           Qualition only uses the services below. It reads their config from your existing MCP setup
@@ -346,6 +392,30 @@ export default function SettingsView({
       </Panel>
     </div>
   )
+}
+
+/** Plain-language description of where the updater currently stands. */
+function describeUpdate(u: UpdateStatus | null, checking: boolean): string {
+  if (checking) return 'Checking GitHub Releases…'
+  if (!u) return 'Update state unknown.'
+  switch (u.state) {
+    case 'dev':
+      return 'Running from source — updates only apply to the packaged app.'
+    case 'checking':
+      return 'Checking GitHub Releases…'
+    case 'available':
+      return `Version ${u.version} is available.`
+    case 'downloading':
+      return `Downloading ${u.version}… ${u.percent ?? 0}%`
+    case 'ready':
+      return `Version ${u.version} downloaded and ready to install.`
+    case 'error':
+      return `Could not check for updates: ${u.error ?? 'unknown error'}`
+    case 'dismissed':
+      return `Version ${u.version} is available (reminder dismissed).`
+    default:
+      return 'You are on the latest version.'
+  }
 }
 
 function Field({ label, children }: { label: React.ReactNode; children: React.ReactNode }): JSX.Element {
