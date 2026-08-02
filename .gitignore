@@ -28,3 +28,6 @@ release
 
 # os
 .DS_Store
+
+# typescript incremental build artifacts (content hashes look like secrets)
+*.tsbuildinfo
