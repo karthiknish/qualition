@@ -115,6 +115,21 @@ export async function deleteCredential(origin: string): Promise<void> {
 }
 
 /** Full credential including the decrypted password. Main process only. */
+/**
+ * Environment fallback for headless and CI runs, where there is no Electron
+ * keychain to read. Deliberately env-only: this app never writes credentials to
+ * a plaintext file, because a file is one `git add -f` away from a public repo
+ * and offers none of the protection the keychain does.
+ *
+ *   QUALITION_AUTH_USERNAME=… QUALITION_AUTH_PASSWORD=… npm run smoke -- <url>
+ */
+function credentialFromEnv(): { username: string; password: string; loginUrl?: string } | null {
+  const username = process.env.QUALITION_AUTH_USERNAME
+  const password = process.env.QUALITION_AUTH_PASSWORD
+  if (!username || !password) return null
+  return { username, password, loginUrl: process.env.QUALITION_AUTH_LOGIN_URL }
+}
+
 export async function resolveCredential(url: string): Promise<{
   username: string
   password: string
@@ -125,7 +140,8 @@ export async function resolveCredential(url: string): Promise<{
 } | null> {
   const origin = originOf(url)
   const found = (await readAll()).find((c) => c.origin === origin)
-  if (!found) return null
+  // The keychain wins; env is the fallback for environments without one.
+  if (!found) return credentialFromEnv()
   let password = ''
   try {
     password = found.encrypted
