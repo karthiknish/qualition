@@ -1,7 +1,7 @@
 {
   "name": "qualition",
-  "version": "0.1.0",
-  "description": "Brutal UI/UX audit desktop app \u2014 automated browser testing, Mobbin references, shadcn replacements, Gemini critique",
+  "version": "0.1.1",
+  "description": "Brutal UI/UX audit desktop app — automated browser testing, Mobbin references, shadcn replacements, Gemini critique",
   "main": "./out/main/index.js",
   "author": "karthik",
   "license": "MIT",
@@ -60,7 +60,7 @@
   "build": {
     "appId": "dev.qualition.app",
     "productName": "Qualition",
-    "copyright": "Copyright \u00a9 2026 Karthik Nishanth",
+    "copyright": "Copyright © 2026 Karthik Nishanth",
     "files": [
       "out/**/*",
       "resources/**/*"
