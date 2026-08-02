@@ -406,15 +406,22 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
   for (const f of findings) {
     // Section- and viewport-specific findings stay separate; they are genuinely
     // different instances.
-    const key = [f.category, f.severity, f.title, f.sectionId ?? '', f.viewport ?? '', f.selector ?? ''].join('|')
+    // Titles that differ only by their number ("29 distinct colours" vs "15
+    // distinct colours") are the same defect measured on different pages.
+    // Keying on the numberless shape merges them into one finding instead of
+    // billing the same root cause four times.
+    const shape = f.title.replace(/\d+(\.\d+)?%?/g, '#')
+    const key = [f.category, shape, f.sectionId ?? '', f.viewport ?? '', f.selector ?? ''].join('|')
     const list = groups.get(key)
     if (list) list.push(f)
     else groups.set(key, [f])
   }
 
+  const order: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
   const out: Finding[] = []
   for (const group of groups.values()) {
-    const first = group[0]
+    // Report the worst instance, so merging never downgrades a real problem.
+    const first = [...group].sort((a, b) => order.indexOf(a.severity) - order.indexOf(b.severity))[0]
     if (group.length === 1) {
       out.push(first)
       continue

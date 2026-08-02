@@ -57,7 +57,12 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
   )
   out.push('')
   out.push('## Ground rules')
-  out.push('- Every item below was measured, not guessed. Treat the numbers as facts about the current build.')
+  out.push(
+    '- Items marked [measured] come from static analysis or from driving the UI: treat those numbers as facts.'
+  )
+  out.push(
+    '- Items marked [review] are a design critique of screenshots. They are judgement, not measurement — confirm before acting on one.'
+  )
   out.push('- Fix the cause, not the symptom: prefer one token/component change over N one-off patches.')
   out.push('- Do not redesign anything that is not listed. No new visual direction, no library swaps beyond what is suggested.')
   out.push('- Keep the existing design language; the goal is coherence and correctness, not novelty.')
@@ -97,7 +102,7 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
         .filter(Boolean)
         .join(' · ')
       out.push('')
-      out.push(`**[${f.id}] ${f.title}** _(${f.category})_`)
+      out.push(`**[${f.id}] ${f.title}** _(${f.category})_ ${f.source === 'ai' ? '`[review]`' : '`[measured]`'}`)
       out.push(`- Evidence: ${f.detail.replace(/\n+/g, ' ').slice(0, 500)}`)
       out.push(`- Required fix: ${f.fix}`)
       out.push(`- Where: ${where}`)

@@ -99,7 +99,7 @@ function evidenceText(page: CapturedPage, interaction?: InteractionReport): stri
     `URL: ${page.url}`,
     `TITLE: ${page.title}`,
     `SECTIONS (id · role · label · height):`,
-    ...page.sections.map((s) => `  ${s.id} · ${s.role} · ${s.label} · ${s.rect.height}px · ${s.stats.interactiveCount} interactive · ${s.stats.distinctFontSizes} type sizes · headings: ${s.headings.slice(0, 3).join(' | ')} · CTAs: ${s.ctaLabels.slice(0, 4).join(' | ')}`),
+    ...page.sections.map((s) => `  ${s.id} · ${s.role} · ${s.rect.height}px · ${s.stats.interactiveCount} interactive · ${s.stats.distinctFontSizes} type sizes · headings: ${s.headings.slice(0, 3).join(' | ')} · CTAs: ${s.ctaLabels.slice(0, 4).join(' | ')}`),
     `RENDERED TOKENS: ${new Set(t.colors.map((x) => x.value)).size} colours, fonts ${t.fontFamilies.map((f) => f.value).join('/')}, sizes ${t.fontSizes.map((s) => s.value).join(',')}px, radii ${t.radii.map((r) => r.value).join('|')}, ${t.shadows.length} shadows`,
     c
       ? `AUTHORED CSS: ${(c.bytes / 1024).toFixed(0)}kB, ${c.rules} rules, colour uniqueness ${(c.colorUniquenessRatio * 100).toFixed(0)}%, ${c.fontSizesUnique} font sizes, ${c.radiiUnique} radii, ${c.shadowsUnique} shadows, !important ${(c.importantRatio * 100).toFixed(1)}%, max specificity (${c.maxSpecificity}), z-index max ${c.zIndexMax}, maintainability ${c.quality.maintainability}`
@@ -186,7 +186,8 @@ export async function critiqueSectionAgainstReferences(
       images.push({ path: r.imageUrl, caption: `Mobbin reference — ${r.appName ?? r.title} (${r.mobbinUrl ?? ''})` })
   }
 
-  const prompt = `SECTION UNDER REVIEW — id ${section.id}, detected role "${section.role}", label "${section.label}", page ${page.url}.
+  const prompt = `SECTION UNDER REVIEW — id ${section.id}, detected role "${section.role}", page ${page.url}.
+NOTE: this tool labels a section with the first heading it finds inside it, which is often NOT the section's real name. Do not report a mismatch between that label and the visible heading as a product defect — judge only what is visible in the evidence.
 ${brutalityLine(config.brutality)}
 ${provider.supportsVision ? `Its own screenshot comes first, then ${images.length - 1} reference screenshot(s) from Mobbin of the same section type in shipped products.` : `Reference products for this section type: ${refs.map((r) => r.appName ?? r.title).join(', ') || 'none available'}.`}
 

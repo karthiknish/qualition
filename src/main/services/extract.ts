@@ -65,8 +65,14 @@ export const extractFn = function (): any {
     if (cs.borderTopWidth !== '0px' && cs.borderTopColor) bump(colorBorder, norm(cs.borderTopColor))
     if (cs.borderRadius && cs.borderRadius !== '0px') {
       // collapse "6px 6px 6px 6px" -> "6px" so uniform radii are not counted twice
-      const parts = cs.borderRadius.split(' ')
-      bump(radii, parts.every((p) => p === parts[0]) ? parts[0] : cs.borderRadius)
+      // A huge px radius is the browser's way of saying "pill"; printing
+      // 3.35544e+07px as a design token is noise.
+      const normalise = (v: string): string => {
+        const px = parseFloat(v)
+        return Number.isFinite(px) && px >= 1000 ? 'full' : v
+      }
+      const parts = cs.borderRadius.split(' ').map(normalise)
+      bump(radii, parts.every((p) => p === parts[0]) ? parts[0] : parts.join(' '))
     }
     if (cs.boxShadow && cs.boxShadow !== 'none') bump(shadows, clamp(cs.boxShadow, 60))
     for (const p of ['paddingTop', 'paddingBottom', 'marginTop', 'marginBottom', 'gap'] as const) {
