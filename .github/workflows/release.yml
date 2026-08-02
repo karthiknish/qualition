@@ -46,7 +46,18 @@ jobs:
           fi
           echo "version $PKG matches tag"
 
-      - name: Build and publish to GitHub Releases
+      # The gate job runs on its own runner, so its build output does not
+      # carry over — compile here before packaging.
+      - name: Compile main, preload and renderer
+        run: npm run build
+
+      - name: Verify entry points exist before packaging
+        run: |
+          test -f out/main/index.js || { echo "::error::out/main/index.js missing"; exit 1; }
+          test -f out/preload/index.mjs || { echo "::error::out/preload/index.mjs missing"; exit 1; }
+          test -f out/renderer/index.html || { echo "::error::out/renderer/index.html missing"; exit 1; }
+
+      - name: Package and publish to GitHub Releases
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Unsigned build: skip Developer ID discovery so packaging cannot
