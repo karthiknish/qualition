@@ -150,10 +150,28 @@ export function refineRoles(pages: CapturedPage[], archetype: Archetype): void {
         .filter((c) => ['input', 'select', 'textarea'].includes(c.tag))
         .reduce((n, c) => n + c.count, 0)
       const isForm = s.components.some((c) => c.tag === 'form') || fieldCount >= 3
+      const toolbarish =
+        s.components.some((c) => ['button', 'a'].includes(c.tag) && c.count >= 3) &&
+        (s.headings[0]?.length ?? 0) < 48 &&
+        s.stats.interactiveCount >= 3 &&
+        s.rect.height < 280
 
-      if (s.role === 'hero' || s.role === 'features' || s.role === 'cta') {
-        s.role = hasTable ? 'table' : isForm ? 'form' : listish ? 'gallery' : 'content'
+      if (s.role === 'hero' || s.role === 'features' || s.role === 'cta' || s.role === 'pricing' || s.role === 'testimonials') {
+        s.role = hasTable
+          ? 'table'
+          : isForm
+            ? 'form'
+            : listish
+              ? 'gallery'
+              : toolbarish
+                ? 'nav'
+                : 'content'
         s.roleConfidence = Math.min(s.roleConfidence, 0.5)
+      }
+      // Marketing "logos" / "faq" inside an app are almost always content chrome.
+      if (s.role === 'logos' || s.role === 'faq') {
+        s.role = 'content'
+        s.roleConfidence = Math.min(s.roleConfidence, 0.45)
       }
     }
   }

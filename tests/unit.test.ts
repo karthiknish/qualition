@@ -254,7 +254,10 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
     [
       {
         href: 'http://localhost:5181/assets/app.css',
-        text: ':root{--color-brand:#5433fd;--color-text:#111}.card{color:var(--color-brand)}.a{color:var(--color-brand)!important;padding:8px}'
+        text:
+          ':root{--color-brand:#5433fd;--color-text:#111}.card{color:var(--color-brand)}.a{color:var(--color-brand)!important;padding:8px}'.repeat(
+            3
+          )
       },
       {
         href: 'https://unpkg.com/normalize.css',
@@ -269,8 +272,68 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
   assert.ok(part.analysis.includes('--color-brand'))
   assert.ok(!part.analysis.includes('normalize.css'))
 
+  // Thin first-party: prefer app+framework over vendor CDN resets.
+  const thin = partitionCssSheets(
+    [
+      { href: 'http://localhost:5181/assets/app.css', text: ':root{--brand:#111}' },
+      {
+        href: 'http://localhost:5181/node_modules/tailwindcss/index.css',
+        text: '/*! tailwind */ .flex{display:flex}' + '.p-1{padding:4px}'.repeat(10)
+      },
+      {
+        href: 'https://unpkg.com/normalize.css',
+        text: '/*! normalize.css */ html{line-height:1.15}' + 'a{color:red}'.repeat(30)
+      }
+    ],
+    'http://localhost:5181/'
+  )
+  assert.equal(thin.scoped, false)
+  assert.ok(thin.analysis.includes('--brand'))
+  assert.ok(thin.analysis.includes('tailwind') || thin.analysis.includes('.flex'))
+  assert.ok(!thin.analysis.includes('normalize.css'))
+
   assert.equal(isFrameworkTokenName('tw-shadow'), true)
   assert.equal(isFrameworkTokenName('color-brand'), false)
+})
+
+test('cookieHeaderFor matches host cookies from storageState', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'q-session-'))
+  const statePath = join(dir, 'state.json')
+  await writeFile(
+    statePath,
+    JSON.stringify({
+      cookies: [
+        { name: 'sid', value: 'abc', domain: 'localhost', path: '/' },
+        { name: 'other', value: 'x', domain: 'example.com', path: '/' }
+      ],
+      origins: []
+    })
+  )
+  const { cookieHeaderFor } = await import('../src/main/services/sessionSeed.js')
+  assert.equal(cookieHeaderFor('http://localhost:5181/app', statePath), 'sid=abc')
+  assert.equal(cookieHeaderFor('https://example.com/', statePath), 'other=x')
+  assert.equal(cookieHeaderFor('https://nope.test/', statePath), undefined)
+})
+
+test('auditPage emits toolFailures and softens console noise severity', () => {
+  const noisy = page({
+    consoleErrors: ['Download the React DevTools for a better development experience'],
+    toolFailures: [{ tool: 'axe', message: 'Script failed to evaluate' }],
+    networkFailures: [{ url: 'https://example.com/favicon.ico', status: 404 }]
+  })
+  const findings = auditPage(noisy, config)
+  assert.ok(findings.some((f) => /axe could not run/i.test(f.title)))
+  assert.ok(!findings.some((f) => /console errors/i.test(f.title)))
+  assert.ok(!findings.some((f) => /missing resources/i.test(f.title)))
+
+  const real = page({
+    consoleErrors: ['TypeError: boom', 'Uncaught ReferenceError: x'],
+    networkFailures: [{ url: 'https://api.example.com/v1/items', status: 404 }]
+  })
+  const realFindings = auditPage(real, config)
+  const consoleFinding = realFindings.find((f) => /console errors/i.test(f.title))
+  assert.ok(consoleFinding)
+  assert.equal(consoleFinding!.severity, 'minor')
 })
 
 test('extractTokenTree skips framework custom properties', async () => {

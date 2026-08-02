@@ -5,9 +5,12 @@
  * best-practices, which nothing else here covers. It drives its own Chrome via
  * CDP, so it runs independently of the Playwright browser and fails soft: a
  * Lighthouse problem must never cost the user their audit.
+ *
+ * Signed-in audits seed the CDP Chrome from Playwright storageState (cookies +
+ * localStorage) with disableStorageReset — Cookie headers alone miss SPA auth.
  */
-import { readFileSync } from 'node:fs'
 import type { Finding, Severity } from '../../shared/types.js'
+import { seedChromeViaCdp } from './sessionSeed.js'
 
 export interface LighthouseScores {
   performance: number | null
@@ -19,6 +22,9 @@ export interface LighthouseScores {
 export interface LighthouseResult {
   scores: LighthouseScores
   findings: Finding[]
+  /** True when the pass could not complete (soft-fail). */
+  failed?: boolean
+  failReason?: string
 }
 
 /** Audits worth surfacing; the rest is noise at this level. */
@@ -54,6 +60,15 @@ const INTERESTING = new Set([
   'deprecations'
 ])
 
+const SEO_AUDITS = new Set([
+  'is-crawlable',
+  'document-title',
+  'meta-description',
+  'link-text',
+  'crawlable-anchors',
+  'hreflang'
+])
+
 let seq = 0
 
 function severityFor(score: number | null, savingsMs: number): Severity {
@@ -63,27 +78,14 @@ function severityFor(score: number | null, savingsMs: number): Severity {
   return 'nit'
 }
 
-function cookieHeader(url: string, storageStatePath?: string): string | undefined {
-  if (!storageStatePath) return undefined
-  try {
-    const state = JSON.parse(readFileSync(storageStatePath, 'utf8')) as {
-      cookies?: { name: string; value: string; domain: string }[]
-    }
-    const host = new URL(url).hostname
-    const cookies = (state.cookies ?? []).filter((c) => {
-      const d = c.domain?.replace(/^\./, '') ?? ''
-      return host === d || host.endsWith(`.${d}`)
-    })
-    if (!cookies.length) return undefined
-    return cookies.map((c) => `${c.name}=${c.value}`).join('; ')
-  } catch {
-    return undefined
-  }
-}
-
 export async function runLighthouse(
   url: string,
-  opts: { storageStatePath?: string; onLog?: (m: string) => void } = {}
+  opts: {
+    storageStatePath?: string
+    /** Skip SEO category for signed-in product UIs (marketing SEO does not apply). */
+    skipSeo?: boolean
+    onLog?: (m: string) => void
+  } = {}
 ): Promise<LighthouseResult | null> {
   let chrome: { kill: () => Promise<void>; port: number } | null = null
   try {
@@ -101,16 +103,28 @@ export async function runLighthouse(
       }
     }
 
-    const extraHeaders: Record<string, string> = {}
-    const cookie = cookieHeader(url, opts.storageStatePath)
-    if (cookie) extraHeaders.Cookie = cookie
+    if (opts.storageStatePath) {
+      const seeded = await seedChromeViaCdp(
+        `http://127.0.0.1:${chrome.port}`,
+        url,
+        opts.storageStatePath
+      )
+      opts.onLog?.(
+        `Lighthouse session seeded: ${seeded.cookies} cookie(s), ${seeded.localStorage} localStorage entr${seeded.localStorage === 1 ? 'y' : 'ies'}`
+      )
+    }
+
+    const categories = opts.skipSeo
+      ? ['performance', 'accessibility', 'best-practices']
+      : ['performance', 'accessibility', 'best-practices', 'seo']
 
     const runnerResult = await lighthouse(
       url,
       {
         port: chrome!.port,
         output: 'json',
-        logLevel: 'silent'
+        logLevel: 'silent',
+        disableStorageReset: !!opts.storageStatePath
       },
       {
         extends: 'lighthouse:default',
@@ -127,25 +141,33 @@ export async function runLighthouse(
           },
           emulatedUserAgent:
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          onlyCategories: ['performance', 'accessibility', 'best-practices', 'seo'],
+          onlyCategories: categories,
           maxWaitForLoad: 45_000,
-          extraHeaders: Object.keys(extraHeaders).length ? extraHeaders : undefined
+          disableStorageReset: !!opts.storageStatePath
         }
       }
     )
     const lhr = runnerResult?.lhr
-    if (!lhr) return null
+    if (!lhr) {
+      return {
+        scores: { performance: null, accessibility: null, bestPractices: null, seo: null },
+        findings: [],
+        failed: true,
+        failReason: 'Lighthouse returned no result object'
+      }
+    }
 
     const scores: LighthouseScores = {
       performance: lhr.categories?.performance?.score ?? null,
       accessibility: lhr.categories?.accessibility?.score ?? null,
       bestPractices: lhr.categories?.['best-practices']?.score ?? null,
-      seo: lhr.categories?.seo?.score ?? null
+      seo: opts.skipSeo ? null : (lhr.categories?.seo?.score ?? null)
     }
 
     const findings: Finding[] = []
     for (const [id, audit] of Object.entries<any>(lhr.audits ?? {})) {
       if (!INTERESTING.has(id)) continue
+      if (opts.skipSeo && SEO_AUDITS.has(id)) continue
       const score = typeof audit.score === 'number' ? audit.score : null
       if (score === null || score >= 0.9) continue
       const savingsMs = Number(audit.details?.overallSavingsMs ?? 0)
@@ -177,12 +199,29 @@ export async function runLighthouse(
     }
 
     opts.onLog?.(
-      `Lighthouse: perf ${Math.round((scores.performance ?? 0) * 100)}, a11y ${Math.round((scores.accessibility ?? 0) * 100)}, best-practices ${Math.round((scores.bestPractices ?? 0) * 100)}, seo ${Math.round((scores.seo ?? 0) * 100)} · ${findings.length} finding(s)`
+      `Lighthouse: perf ${Math.round((scores.performance ?? 0) * 100)}, a11y ${Math.round((scores.accessibility ?? 0) * 100)}, best-practices ${Math.round((scores.bestPractices ?? 0) * 100)}${opts.skipSeo ? ', seo skipped (app)' : `, seo ${Math.round((scores.seo ?? 0) * 100)}`} · ${findings.length} finding(s)`
     )
     return { scores, findings }
   } catch (e) {
-    opts.onLog?.(`Lighthouse skipped: ${(e as Error).message.slice(0, 160)}`)
-    return null
+    const failReason = (e as Error).message.slice(0, 200)
+    opts.onLog?.(`Lighthouse skipped: ${failReason}`)
+    return {
+      scores: { performance: null, accessibility: null, bestPractices: null, seo: null },
+      findings: [
+        {
+          id: `lh${++seq}`,
+          category: 'flow',
+          severity: 'minor',
+          title: 'Lighthouse could not run',
+          detail: failReason,
+          fix: 'Re-run the audit. If this persists, check that Chrome can launch and the target is reachable.',
+          pageUrl: url,
+          source: 'lighthouse'
+        }
+      ],
+      failed: true,
+      failReason
+    }
   } finally {
     try {
       await chrome?.kill()

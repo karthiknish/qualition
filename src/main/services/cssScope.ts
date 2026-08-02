@@ -134,10 +134,17 @@ export function partitionCssSheets(sheets: CssSheetInput[], pageUrl?: string): C
     total: classified.length
   }
 
-  // Prefer first-party CSS for design-system metrics. Fall back to everything
-  // when the app sheet is empty (SSR shell, CSS-in-JS-only, etc.).
-  const scoped = app.length >= 80
-  const analysis = scoped ? app : total
+  // Prefer first-party CSS for design-system metrics. When the app sheet is
+  // thin (CSS-in-JS / Tailwind-heavy), analyze app+framework and drop vendor
+  // noise rather than scoring CDN resets as the design system.
+  const useAppOnly = app.length >= 200
+  const appPlusFramework = [app, framework].filter(Boolean).join('\n')
+  const scoped = useAppOnly
+  const analysis = useAppOnly
+    ? app
+    : appPlusFramework.length >= 80
+      ? appPlusFramework
+      : total
 
   return { app, framework, vendor, analysis, scoped, sheets: classified, bytes, sheetCounts }
 }

@@ -167,19 +167,44 @@ export async function performLogin(
         'error text',
         null
       )
+      const landed = page.url()
+      const navigated = landed !== before
+      const mfaStep = /\/(mfa|2fa|otp|verify|challenge|confirm-email|magic)/i.test(landed)
+      // Soft SPA nav: same document URL but session already written (Supabase etc.).
+      const softSession = await soft(
+        page.evaluate(() => {
+          const keys = Object.keys(localStorage)
+          return keys.some((k) => /supabase|auth|token|session|sb-|clerk|firebase/i.test(k))
+        }),
+        deadline.slice(3000),
+        'session keys',
+        false
+      )
 
       await soft(page.screenshot({ path: shotPath }).then(() => undefined), 8000, 'auth screenshot', undefined)
 
-      if (!stillHasPassword) {
+      if (!stillHasPassword || (navigated && softSession) || (mfaStep && softSession)) {
         const state = await ctx.storageState({ path: statePath })
         const cookies = state.cookies?.length ?? 0
         const stored = (state.origins ?? []).reduce((n, o) => n + (o.localStorage?.length ?? 0), 0)
+        // Prefer a session with actual storage even when password field lingers (MFA).
+        if (cookies + stored === 0 && stillHasPassword && !mfaStep) {
+          await ctx.close().catch(() => {})
+          return {
+            ok: false,
+            detail: `Login rejected at ${url}${errorText ? `: ${errorText.trim().slice(0, 160)}` : ' — password field still present, no session'}`,
+            screenshot: shotPath
+          }
+        }
         await ctx.close()
+        const note = mfaStep
+          ? `Reached MFA/verify step at ${landed} — session partial (${cookies} cookie(s), ${stored} localStorage)`
+          : `Signed in as ${auth.username} via ${url} — session captured (${cookies} cookie(s), ${stored} localStorage entr${stored === 1 ? 'y' : 'ies'})`
         return {
           ok: true,
-          detail: `Signed in as ${auth.username} via ${url} — session captured (${cookies} cookie(s), ${stored} localStorage entr${stored === 1 ? 'y' : 'ies'})`,
+          detail: note,
           storageStatePath: statePath,
-          landedUrl: page.url(),
+          landedUrl: landed,
           screenshot: shotPath
         }
       }

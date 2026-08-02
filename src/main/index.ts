@@ -22,6 +22,7 @@ import {
   installUpdate
 } from './services/updater.js'
 import { buildFixPrompt, type PromptOptions } from './services/prompt.js'
+import { configurePlaywrightBrowsersPath } from './services/browsers.js'
 import { modelFor, type IntegrationStatus, type ProviderId, type Run, type RunConfig, type Settings } from '../shared/types.js'
 
 const __dirname_ = fileURLToPath(new URL('.', import.meta.url))
@@ -87,6 +88,8 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  configurePlaywrightBrowsersPath()
+
   // Dock icon for `npm run dev` / preview, where there is no .icns bundle yet.
   const icon = iconPath()
   if (icon && process.platform === 'darwin' && app.dock) {

@@ -235,12 +235,17 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
   useEffect(() => {
     if (!open) return
     const onReposition = (): void => placeMenu()
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setOpen(false)
+    }
     window.addEventListener('resize', onReposition)
     // Report scrolls inside <main>, not window — capture phase catches it.
     window.addEventListener('scroll', onReposition, true)
+    window.addEventListener('keydown', onKey)
     return () => {
       window.removeEventListener('resize', onReposition)
       window.removeEventListener('scroll', onReposition, true)
+      window.removeEventListener('keydown', onKey)
     }
   }, [open])
 
@@ -267,7 +272,13 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
 
   return (
     <div ref={triggerRef} className="relative">
-      <Button size="sm" variant="primary" onClick={() => setOpen(!open)}>
+      <Button
+        size="sm"
+        variant="primary"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
         {copied ?? label}
       </Button>
       {open && menuPos && (
@@ -275,6 +286,7 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
           <div className="fixed inset-0 z-[80]" onClick={() => setOpen(false)} />
           <div
             role="menu"
+            aria-label="Copy fix prompt scope"
             className="fixed z-[90] w-64 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60"
             style={{ top: menuPos.top, right: menuPos.right }}
           >
@@ -339,7 +351,7 @@ function Overview({ run }: { run: Run }): JSX.Element {
       </Panel>
 
       <div className="col-span-2 space-y-4">
-        {run.lighthouse && (
+        {run.lighthouse ? (
           <Panel title="Lighthouse">
             <div className="grid grid-cols-4 gap-3">
               {(
@@ -369,8 +381,15 @@ function Overview({ run }: { run: Run }): JSX.Element {
                 </div>
               ))}
             </div>
+            {run.lighthouseNote && (
+              <p className="mt-3 text-[11px] leading-snug text-zinc-500">{run.lighthouseNote}</p>
+            )}
           </Panel>
-        )}
+        ) : run.lighthouseNote ? (
+          <Panel title="Lighthouse">
+            <Empty>{run.lighthouseNote}</Empty>
+          </Panel>
+        ) : null}
         {run.geminiNotes && (
           <Panel title="Executive read · Gemini">
             <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-200">{run.geminiNotes}</p>

@@ -272,16 +272,37 @@ export async function executeRun(
       checkpoint()
       progress('lighthouse', 38, 'Running Lighthouse (perf / a11y / best-practices / SEO)')
       const primary = run.pages[0]?.url ?? cfg.targetUrl
+      const skipSeo = run.archetype?.archetype === 'app'
       const lh = await raceCancel(
-        runLighthouse(primary, { storageStatePath: storageState, onLog: (m) => log('info', m) })
+        runLighthouse(primary, {
+          storageStatePath: storageState,
+          skipSeo,
+          onLog: (m) => log('info', m)
+        })
       )
       if (lh) {
         run.lighthouse = lh.scores
         run.findings.push(...lh.findings)
+        if (lh.failed) {
+          run.lighthouseNote = lh.failReason ?? 'Lighthouse did not complete'
+        } else if (skipSeo) {
+          run.lighthouseNote = 'SEO category skipped for signed-in / app UI'
+        }
       }
     } catch (e) {
       if ((e as Error).name === 'CancelledError') throw e
       log('warn', `Lighthouse failed: ${(e as Error).message}`)
+      run.lighthouseNote = (e as Error).message.slice(0, 200)
+      run.findings.push({
+        id: `lh-fail-${Date.now()}`,
+        category: 'flow',
+        severity: 'minor',
+        title: 'Lighthouse could not run',
+        detail: (e as Error).message.slice(0, 200),
+        fix: 'Re-run the audit. If this persists, check that Chrome can launch.',
+        pageUrl: cfg.targetUrl,
+        source: 'lighthouse'
+      })
     }
 
     try {
@@ -300,6 +321,16 @@ export async function executeRun(
     } catch (e) {
       if ((e as Error).name === 'CancelledError') throw e
       log('warn', `pa11y failed: ${(e as Error).message}`)
+      run.findings.push({
+        id: `p11y-fail-${Date.now()}`,
+        category: 'accessibility',
+        severity: 'minor',
+        title: 'pa11y could not run',
+        detail: (e as Error).message.slice(0, 200),
+        fix: 'Re-run the audit. axe still covers the primary accessibility pass.',
+        pageUrl: cfg.targetUrl,
+        source: 'pa11y'
+      })
     }
     await saveRun(run)
 
@@ -323,7 +354,7 @@ export async function executeRun(
     /* 2c. deep interaction probe — actually operate the UI */
     if (cfg.useInteractionProbe) {
       const probeViewport = (cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS)[0]
-      for (const page of run.pages.slice(0, 4)) {
+      for (const page of run.pages.slice(0, 8)) {
         checkpoint()
         progress('interaction', 44, `Operating controls on ${page.url}`)
         try {

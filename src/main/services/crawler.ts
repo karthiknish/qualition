@@ -10,7 +10,8 @@ import { extractFn, observerInit } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
 import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
-import { hideDevChrome } from './devChrome.js'
+import { hideDevChrome, installDevChromeGuard } from './devChrome.js'
+import { configurePlaywrightBrowsersPath } from './browsers.js'
 import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
 import type {
   AxeViolation,
@@ -77,6 +78,7 @@ export async function launch(): Promise<Browser> {
   // Headless Chromium can soft-lose document focus so Tab sweeps report zero
   // stops (playwright#39268). Interaction probes call bringToFront() + seed
   // focus on a real control before Tabing; keep launch minimal.
+  configurePlaywrightBrowsersPath()
   return chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] })
 }
 
@@ -154,6 +156,7 @@ export async function capturePage(
   let ok = true
   let errorText: string | undefined
   let sections: PageSection[] = []
+  const toolFailures: { tool: string; message: string }[] = []
 
   for (const vp of opts.viewports) {
     const ctx = await browser.newContext({
@@ -170,16 +173,32 @@ export async function capturePage(
     })
     const page = await ctx.newPage()
     await page.addInitScript(observerInit)
+    // Install before navigation so __qualitionIsDevChrome exists on first paint.
+    await installDevChromeGuard(page).catch(() => {})
 
     page.on('console', (m) => {
-      if (m.type() === 'error') consoleErrors.push(`[${vp.name}] ${m.text().slice(0, 300)}`)
+      if (m.type() !== 'error') return
+      const text = m.text().slice(0, 300)
+      if (isNoisyConsole(text)) return
+      consoleErrors.push(`[${vp.name}] ${text}`)
     })
-    page.on('pageerror', (e) => consoleErrors.push(`[${vp.name}] pageerror: ${e.message.slice(0, 300)}`))
-    page.on('requestfailed', (r) =>
-      networkFailures.push({ url: r.url().slice(0, 200), status: r.failure()?.errorText ?? 'failed' })
-    )
+    page.on('pageerror', (e) => {
+      const text = e.message.slice(0, 300)
+      if (isNoisyConsole(text)) return
+      consoleErrors.push(`[${vp.name}] pageerror: ${text}`)
+    })
+    page.on('requestfailed', (r) => {
+      const u = r.url()
+      if (isNoisyNetworkUrl(u)) return
+      networkFailures.push({ url: u.slice(0, 200), status: r.failure()?.errorText ?? 'failed' })
+    })
     page.on('response', (r) => {
-      if (r.status() >= 400) networkFailures.push({ url: r.url().slice(0, 200), status: r.status() })
+      if (r.status() < 400) return
+      const u = r.url()
+      if (isNoisyNetworkUrl(u)) return
+      // Favicon / sourcemap 404s are noise; keep app API and document failures.
+      if (r.status() === 404 && isBenign404(u)) return
+      networkFailures.push({ url: u.slice(0, 200), status: r.status() })
     })
 
     try {
@@ -216,6 +235,7 @@ export async function capturePage(
       await page.waitForTimeout(400)
 
       // Hide Agentation / Vercel toolbar / similar before we screenshot or walk the DOM.
+      // MutationObserver (from installDevChromeGuard) re-hides remounts.
       const hiddenChrome = await hideDevChrome(page)
       if (hiddenChrome > 0) opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) (Agentation etc.) on ${url}`)
 
@@ -324,7 +344,9 @@ export async function capturePage(
             }))
           }))
         } catch (e) {
-          opts.onLog?.(`axe failed on ${url}: ${(e as Error).message}`)
+          const msg = (e as Error).message.slice(0, 200)
+          opts.onLog?.(`axe failed on ${url}: ${msg}`)
+          toolFailures.push({ tool: 'axe', message: msg })
         }
       }
     } catch (e) {
@@ -362,13 +384,53 @@ export async function capturePage(
       longTaskMs: perf.longTaskMs ?? 0
     },
     consoleErrors: [...new Set(consoleErrors)].slice(0, 40),
-    networkFailures: networkFailures.slice(0, 40),
+    networkFailures: dedupeNetwork(networkFailures).slice(0, 40),
+    toolFailures: toolFailures.length ? toolFailures : undefined,
     controls: extracted?.controls ?? [],
     responsive,
     links: extracted?.links ?? [],
     // signals ride along for the heuristic pass
     ...({ signals: extracted?.signals ?? {} } as any)
   }
+}
+
+/** Devtools / extension / HMR noise that should not tank the flow score. */
+function isNoisyConsole(text: string): boolean {
+  return (
+    /Download the React DevTools/i.test(text) ||
+    /\[HMR\]|\[vite\]|Fast Refresh|webpackHotUpdate/i.test(text) ||
+    /third-party cookie|Deprecated.*Synchronous XMLHttpRequest/i.test(text) ||
+    /Failed to load resource:.*favicon/i.test(text) ||
+    /net::ERR_BLOCKED_BY_CLIENT|ERR_FAILED.*chrome-extension/i.test(text) ||
+    /Agentation|react-scan|stagingwise/i.test(text)
+  )
+}
+
+function isNoisyNetworkUrl(u: string): boolean {
+  return (
+    /chrome-extension:|moz-extension:/i.test(u) ||
+    /\/favicon\.ico(\?|$)/i.test(u) ||
+    /hot-update|__vite|@react-refresh|sockjs-node|webpack-hmr/i.test(u) ||
+    /googletagmanager|google-analytics|doubleclick|facebook\.net\/tr/i.test(u)
+  )
+}
+
+function isBenign404(u: string): boolean {
+  return /\.(map|ico|woff2?|ttf|eot)(\?|$)/i.test(u) || /\/favicon/i.test(u) || /apple-touch-icon/i.test(u)
+}
+
+function dedupeNetwork(
+  rows: { url: string; status: number | string }[]
+): { url: string; status: number | string }[] {
+  const seen = new Set<string>()
+  const out: typeof rows = []
+  for (const r of rows) {
+    const key = `${r.status}|${r.url}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(r)
+  }
+  return out
 }
 
 /** Breadth-first same-origin crawl. */

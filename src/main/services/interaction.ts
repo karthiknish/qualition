@@ -20,7 +20,7 @@
 import type { Browser, Page } from 'playwright'
 import { join } from 'node:path'
 import { Deadline, limit, soft } from './deadline.js'
-import { hideDevChrome } from './devChrome.js'
+import { hideDevChrome, installDevChromeGuard } from './devChrome.js'
 import type { Finding, InteractionReport, Severity, Viewport } from '../../shared/types.js'
 
 export { Deadline } from './deadline.js'
@@ -59,9 +59,11 @@ const collectControls = function (): any {
   const out: any[] = []
   const seen = new Set<Element>()
   const selector =
-    'button, a[href], input, select, textarea, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=switch], [role=checkbox], [onclick], [data-testid*=button i]'
+    'button, a[href], input, select, textarea, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=switch], [role=checkbox], [role=option], [role=combobox], [onclick], [data-testid*=button i]'
 
   const isDevChrome = (el: Element | null): boolean => {
+    const w = window as unknown as { __qualitionIsDevChrome?: (e: Element | null) => boolean }
+    if (typeof w.__qualitionIsDevChrome === 'function') return w.__qualitionIsDevChrome(el)
     let cur: Element | null = el
     while (cur && cur !== document.documentElement) {
       if (
@@ -71,6 +73,7 @@ const collectControls = function (): any {
         cur.hasAttribute('data-vercel-toolbar') ||
         cur.hasAttribute('data-nextjs-toast') ||
         cur.hasAttribute('data-nextjs-dialog') ||
+        cur.hasAttribute('data-nextjs-dialog-overlay') ||
         cur.hasAttribute('data-react-scan') ||
         cur.hasAttribute('data-stagewise') ||
         cur.hasAttribute('data-q-dev-chrome')
@@ -261,22 +264,44 @@ const pageSignature = function (): any {
     Array.from(document.querySelectorAll(sel))
       .map((e) => e.getAttribute(attr))
       .join('')
+  const overlayCount = document.querySelectorAll(
+    [
+      'dialog[open]',
+      '[role=dialog]',
+      '[role=alertdialog]',
+      '[aria-modal=true]',
+      '[role=menu]',
+      '[role=listbox]',
+      '[role=tree]',
+      '[data-radix-popper-content-wrapper]',
+      '[data-radix-menu-content]',
+      '[data-state=open][role=menu]',
+      '[data-vaul-drawer]',
+      '[data-state=open].sheet',
+      '[class*="sheet" i][data-state=open]',
+      '[class*="popover" i][data-state=open]',
+      '[class*="dropdown" i][data-state=open]'
+    ].join(',')
+  ).length
   return {
     url: location.href,
     domSize: document.body.innerHTML.length,
     nodeCount: document.querySelectorAll('*').length,
     dialogs: document.querySelectorAll('dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true]').length,
+    overlays: overlayCount,
     expanded: attrs('[aria-expanded]', 'aria-expanded'),
     selected: attrs('[aria-selected]', 'aria-selected'),
     pressed: attrs('[aria-pressed]', 'aria-pressed'),
     checkedAria: attrs('[aria-checked]', 'aria-checked'),
     dataState: attrs('[data-state]', 'data-state'),
+    dataOpen: attrs('[data-open],details', 'open') + attrs('[open]', 'open'),
     // Theme switches usually only mutate the root class or a data attribute.
     rootClass: document.documentElement.className,
     rootTheme: document.documentElement.getAttribute('data-theme') ?? '',
     colorScheme: document.documentElement.style.colorScheme ?? '',
     bodyClass: document.body.className,
     bodyBg: getComputedStyle(document.body).backgroundColor,
+    mainTextLen: (document.querySelector('main')?.textContent ?? document.body.textContent ?? '').length,
     // Form state: checkboxes, radios, selects, and text length (not content).
     controlState: Array.from(document.querySelectorAll('input,select,textarea'))
       .slice(0, 120)
@@ -351,6 +376,7 @@ export async function probeInteractions(
   // Page-level defaults so no Playwright action can block indefinitely.
   page.setDefaultTimeout(3000)
   page.setDefaultNavigationTimeout(20_000)
+  await installDevChromeGuard(page).catch(() => {})
   // A window.confirm/alert from a probed click would freeze everything.
   page.on('dialog', (d) => {
     d.dismiss().catch(() => {})
@@ -480,11 +506,66 @@ export async function probeInteractions(
           undefined
         )
 
-        // Hover feedback
-        await limit(locator.hover({ timeout: deadline.slice(2000) }), deadline.slice(2500), 'hover')
-        await page.waitForTimeout(120)
-        const hovered = await soft(page.evaluate(styleOf), deadline.slice(2000), 'hover style', null)
-        if (hovered && !styleChanged(c.resting, hovered) && c.cursor === 'pointer') {
+        // Hover feedback — dwell long enough for CSS transitions (often 150–200ms).
+        await soft(
+          page.evaluate((s) => {
+            document.querySelectorAll('[data-q-probe]').forEach((e) => e.removeAttribute('data-q-probe'))
+            document.querySelector(s)?.setAttribute('data-q-probe', '1')
+          }, sel),
+          deadline.slice(2500),
+          'mark probe for hover',
+          undefined
+        )
+        const beforeChild = await soft(
+          page.evaluate(() => {
+            const child = document.querySelector('[data-q-probe="1"]')?.firstElementChild as HTMLElement | null
+            if (!child) return null
+            const cs = getComputedStyle(child)
+            return {
+              background: cs.backgroundColor,
+              color: cs.color,
+              opacity: cs.opacity,
+              transform: cs.transform,
+              boxShadow: cs.boxShadow,
+              filter: cs.filter
+            }
+          }),
+          deadline.slice(2000),
+          'child rest style',
+          null
+        )
+        await limit(locator.hover({ timeout: deadline.slice(2000), force: true }), deadline.slice(2500), 'hover')
+        await page.waitForTimeout(220)
+        const hovered = await soft(
+          page.evaluate(() => {
+            const el = document.querySelector('[data-q-probe="1"]') as HTMLElement | null
+            if (!el) return null
+            const read = (node: Element): any => {
+              const cs = getComputedStyle(node)
+              return {
+                outline: cs.outlineStyle === 'none' ? '' : `${cs.outlineStyle} ${cs.outlineWidth} ${cs.outlineColor}`,
+                boxShadow: cs.boxShadow,
+                background: cs.backgroundColor,
+                color: cs.color,
+                border: cs.borderColor + cs.borderWidth,
+                transform: cs.transform,
+                textDecoration: cs.textDecorationLine,
+                opacity: cs.opacity,
+                filter: cs.filter
+              }
+            }
+            return { self: read(el), child: el.firstElementChild ? read(el.firstElementChild) : null }
+          }),
+          deadline.slice(2000),
+          'hover style',
+          null
+        )
+        if (
+          hovered &&
+          c.cursor === 'pointer' &&
+          !styleChanged(c.resting, hovered.self) &&
+          !styleChanged(beforeChild, hovered.child)
+        ) {
           report.noHoverFeedback.push(label)
         }
 
@@ -546,7 +627,7 @@ export async function probeInteractions(
           deadline.slice(3000),
           'click'
         )
-        await page.waitForTimeout(500)
+        await page.waitForTimeout(750)
         const after = await soft(page.evaluate(pageSignature), deadline.slice(2000), 'signature', before)
 
         const changed =
@@ -554,28 +635,50 @@ export async function probeInteractions(
           Math.abs(before.domSize - after.domSize) > 40 ||
           before.nodeCount !== after.nodeCount ||
           before.dialogs !== after.dialogs ||
+          before.overlays !== after.overlays ||
           before.expanded !== after.expanded ||
           before.selected !== after.selected ||
           before.pressed !== after.pressed ||
           before.checkedAria !== after.checkedAria ||
           before.dataState !== after.dataState ||
+          before.dataOpen !== after.dataOpen ||
           before.rootClass !== after.rootClass ||
           before.rootTheme !== after.rootTheme ||
           before.colorScheme !== after.colorScheme ||
           before.bodyClass !== after.bodyClass ||
           before.bodyBg !== after.bodyBg ||
           before.controlState !== after.controlState ||
+          Math.abs((before.mainTextLen ?? 0) - (after.mainTextLen ?? 0)) > 20 ||
+          before.focused !== after.focused ||
           Math.abs(before.scrollY - after.scrollY) > 20
 
-        if (!changed) {
-          report.deadClicks.push(label)
+        // Skip dead-click on controls that are expected to be no-ops when already active
+        // (selected tab, pressed toggle) — signature may not move.
+        const likelyStateful =
+          c.role === 'tab' || c.role === 'menuitem' || c.role === 'option' || c.role === 'switch' || c.role === 'checkbox'
+        if (!changed && !likelyStateful) {
+          // Second look after another beat — animations / portals often land late.
+          await page.waitForTimeout(400)
+          const after2 = await soft(page.evaluate(pageSignature), deadline.slice(2000), 'signature-retry', after)
+          const changedLate =
+            before.url !== after2.url ||
+            before.dialogs !== after2.dialogs ||
+            before.overlays !== after2.overlays ||
+            before.expanded !== after2.expanded ||
+            before.dataState !== after2.dataState ||
+            before.dataOpen !== after2.dataOpen ||
+            Math.abs(before.domSize - after2.domSize) > 40
+          if (!changedLate) report.deadClicks.push(label)
         }
 
-        // If an overlay opened, test Escape and focus containment.
-        if (after.dialogs > before.dialogs) {
+        // If an overlay / menu / sheet opened, test Escape and focus containment.
+        const overlayOpened = after.overlays > before.overlays || after.dialogs > before.dialogs
+        if (overlayOpened) {
           const trapped = await soft(
             page.evaluate(() => {
-              const dlg = document.querySelector('dialog[open],[role=dialog],[aria-modal=true]')
+              const dlg = document.querySelector(
+                'dialog[open],[role=dialog],[role=alertdialog],[aria-modal=true],[role=menu],[data-radix-popper-content-wrapper],[data-state=open]'
+              )
               return !!dlg && !!dlg.contains(document.activeElement)
             }),
             deadline.slice(2000),
@@ -585,7 +688,7 @@ export async function probeInteractions(
           await soft(page.keyboard.press('Escape'), deadline.slice(1500), 'escape', undefined)
           await page.waitForTimeout(350)
           const afterEsc = await soft(page.evaluate(pageSignature), deadline.slice(2000), 'signature', after)
-          const closed = afterEsc.dialogs < after.dialogs
+          const closed = afterEsc.overlays < after.overlays || afterEsc.dialogs < after.dialogs
           report.overlays.push({ trigger: label, focusMoved: trapped, escapeCloses: closed })
           report.keyboard.escapeClosesOverlay = closed
           report.keyboard.focusTrapOk = trapped
@@ -775,9 +878,9 @@ function summarise(r: InteractionReport, url: string, viewport: string): Finding
 
   if (r.deadClicks.length) {
     out.push(
-      mk(url, r.deadClicks.length > 3 ? 'critical' : 'major',
+      mk(url, r.deadClicks.length > 6 ? 'major' : 'minor',
         `${r.deadClicks.length} control(s) do nothing when clicked`,
-        `Activated with no URL change, no DOM change, no dialog, no aria-expanded change, no scroll: ${list(r.deadClicks)}. Either they are broken, or their effect is invisible — both read as broken to a user.`,
+        `Activated with no URL change, no DOM change, no dialog/menu, no aria-expanded change, no scroll: ${list(r.deadClicks)}. Either they are broken, or their effect is invisible — both read as broken to a user.`,
         'Wire the handler, or give the click visible consequence (state change, toast, navigation, loading state).',
         { viewport })
     )
@@ -811,7 +914,7 @@ function summarise(r: InteractionReport, url: string, viewport: string): Finding
   }
   if (r.unnamedControls.length) {
     out.push(
-      mk(url, 'critical',
+      mk(url, r.unnamedControls.length > 8 ? 'major' : 'minor',
         `${r.unnamedControls.length} control(s) have no accessible name`,
         `Icon-only or empty controls: ${list(r.unnamedControls)}. A screen reader announces "button" and nothing else.`,
         'Add aria-label or visually hidden text describing the action, not the icon.',

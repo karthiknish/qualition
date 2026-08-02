@@ -208,8 +208,11 @@ export interface CapturedPage {
   metrics: PageMetrics
   consoleErrors: string[]
   networkFailures: { url: string; status: number | string }[]
+  /** Soft tool failures (axe / CSS / …) so the report is not silently incomplete. */
+  toolFailures?: { tool: string; message: string }[]
   /** Verbatim targetable controls found on the page. */
   controls: PageControl[]
+
   responsive: {
     viewport: string
     horizontalOverflowPx: number
@@ -441,6 +444,8 @@ export interface Run {
     bestPractices: number | null
     seo: number | null
   }
+  /** Why Lighthouse is missing or partial (soft-fail / skipped SEO for apps). */
+  lighthouseNote?: string
   error?: string
   log: { ts: number; level: 'info' | 'warn' | 'error'; msg: string }[]
 }

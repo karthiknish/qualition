@@ -258,7 +258,23 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   }
 
   /* ---- accessibility ---- */
+  for (const t of page.toolFailures ?? []) {
+    out.push(
+      mk(
+        page,
+        t.tool === 'axe' ? 'accessibility' : 'flow',
+        'minor',
+        `${t.tool} could not run on this page`,
+        t.message,
+        'Re-run the audit. If this persists, check CSP, network, or that the page finished loading.'
+      )
+    )
+  }
+  // One finding per axe rule (not per node cluster) — keeps the list actionable.
+  const axeSeen = new Set<string>()
   for (const v of page.axe) {
+    if (axeSeen.has(v.id)) continue
+    axeSeen.add(v.id)
     const sev: Severity =
       v.impact === 'critical' ? 'critical' : v.impact === 'serious' ? 'major' : v.impact === 'moderate' ? 'minor' : 'nit'
     out.push({
@@ -340,21 +356,24 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   }
 
   /* ---- flow / runtime health ---- */
-  if (page.consoleErrors.length > 0) {
+  const realConsole = page.consoleErrors.filter((e) => !/Download the React DevTools|\[HMR\]|\[vite\]/i.test(e))
+  if (realConsole.length > 0) {
     out.push(
-      mk(page, 'flow', page.consoleErrors.length > 5 ? 'critical' : 'major',
-        `${page.consoleErrors.length} console errors`,
-        page.consoleErrors.slice(0, 5).join('\n'),
+      mk(page, 'flow', realConsole.length > 8 ? 'major' : 'minor',
+        `${realConsole.length} console errors`,
+        realConsole.slice(0, 5).join('\n'),
         'Ship zero console errors. Each one is a feature that is silently broken for someone.')
     )
   }
   const hardFails = page.networkFailures.filter((n) => typeof n.status === 'number' && n.status >= 500)
-  const notFound = page.networkFailures.filter((n) => n.status === 404)
+  const notFound = page.networkFailures.filter(
+    (n) => n.status === 404 && !/\.(map|ico|woff2?)(\?|$)/i.test(n.url)
+  )
   if (hardFails.length) {
     out.push(mk(page, 'flow', 'critical', `${hardFails.length} server errors (5xx)`, hardFails.slice(0, 5).map((f) => `${f.status} ${f.url}`).join('\n'), 'Fix or remove the failing endpoint; 5xx during page load means the experience is partially dead.'))
   }
   if (notFound.length) {
-    out.push(mk(page, 'flow', 'major', `${notFound.length} missing resources (404)`, notFound.slice(0, 5).map((f) => f.url).join('\n'), 'Broken assets/endpoints — delete the reference or restore the file.'))
+    out.push(mk(page, 'flow', notFound.length > 5 ? 'major' : 'minor', `${notFound.length} missing resources (404)`, notFound.slice(0, 5).map((f) => f.url).join('\n'), 'Broken assets/endpoints — delete the reference or restore the file.'))
   }
   if (page.status >= 400) {
     out.push(mk(page, 'flow', 'blocker', `Page returned HTTP ${page.status}`, 'The document itself is an error response.', 'Fix routing/permissions before auditing anything else.'))

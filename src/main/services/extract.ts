@@ -34,6 +34,8 @@ export const extractFn = function (): any {
   }
 
   const isDevChrome = (el: Element | null): boolean => {
+    const w = window as unknown as { __qualitionIsDevChrome?: (e: Element | null) => boolean }
+    if (typeof w.__qualitionIsDevChrome === 'function') return w.__qualitionIsDevChrome(el)
     let cur: Element | null = el
     while (cur && cur !== document.documentElement) {
       if (
@@ -43,6 +45,7 @@ export const extractFn = function (): any {
         cur.hasAttribute('data-vercel-toolbar') ||
         cur.hasAttribute('data-nextjs-toast') ||
         cur.hasAttribute('data-nextjs-dialog') ||
+        cur.hasAttribute('data-nextjs-dialog-overlay') ||
         cur.hasAttribute('data-react-scan') ||
         cur.hasAttribute('data-stagewise') ||
         cur.hasAttribute('data-q-dev-chrome')
@@ -455,7 +458,11 @@ export const extractFn = function (): any {
       .map((h) => (h.textContent ?? '').replace(/\s+/g, ' ').trim())
       .filter(Boolean)
       .slice(0, 6)
-    const interactives = Array.from(el.querySelectorAll('a,button,input,select,textarea,[role=button]'))
+    const interactives = Array.from(
+      el.querySelectorAll(
+        'a,button,input,select,textarea,[role=button],[role=link],[role=tab],[role=menuitem],[role=switch],[role=checkbox]'
+      )
+    )
     const ctaLabels = interactives
       .map((b) => (b.textContent ?? (b as HTMLInputElement).value ?? '').replace(/\s+/g, ' ').trim())
       .filter((t) => t && t.length < 40)
@@ -547,7 +554,9 @@ export const extractFn = function (): any {
     const r = el.getBoundingClientRect()
     const txt = (el.textContent ?? '').trim()
     if (txt.length >= 4 && el.children.length === 0 && parseFloat(cs.fontSize) < 12) tinyTextCount++
-    const clickable = el.matches('a,button,input,select,[role=button],[onclick]')
+    const clickable = el.matches(
+      'a,button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=switch],[onclick]'
+    )
     if (clickable && (r.height < 32 || r.width < 32) && r.height > 0) smallTapTargets++
     if (clickable && r.width > 0) boxes.push({ r, el })
   }
@@ -586,7 +595,9 @@ export const extractFn = function (): any {
   // built from this list instead of being imagined.
   const controls: any[] = []
   for (const el of Array.from(
-    document.querySelectorAll('a[href], button, input, select, textarea, [role=button], [role=link], [role=tab]')
+    document.querySelectorAll(
+      'a[href], button, input, select, textarea, summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=switch], [role=checkbox], [role=option], [role=combobox]'
+    )
   )) {
     if (!isVisible(el) || controls.length >= 120) continue
     const input = el as HTMLInputElement

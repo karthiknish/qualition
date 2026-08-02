@@ -26,6 +26,9 @@ release
 .env
 .env.local
 
+# bundled Playwright browsers (copied at dist time)
+resources/ms-playwright
+
 # os
 .DS_Store
 

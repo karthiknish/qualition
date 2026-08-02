@@ -12,10 +12,10 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "browsers": "playwright install chromium",
-    "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=esm --target=node20 --external:playwright --external:electron --external:@axe-core/playwright --external:@google/genai --external:pngjs --external:pixelmatch --external:lighthouse --external:chrome-launcher --external:pa11y --external:style-dictionary --external:css-tree --external:odiff-bin --outfile=./.smoke.mjs && node ./.smoke.mjs",
-    "dist": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
-    "test": "esbuild tests/unit.test.ts --bundle --platform=node --format=esm --target=node20 --external:playwright --external:@axe-core/playwright --external:@google/genai --external:pngjs --external:pixelmatch --external:lighthouse --external:chrome-launcher --external:pa11y --external:style-dictionary --external:css-tree --external:odiff-bin --alias:electron=./tests/stubs/electron.ts --outfile=./.test.mjs && node --test ./.test.mjs",
-    "dist:dir": "electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
+    "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=esm --target=node20 --external:playwright --external:electron --external:@axe-core/playwright --external:@google/genai --external:pngjs --external:pixelmatch --external:lighthouse --external:chrome-launcher --external:pa11y --external:style-dictionary --external:css-tree --external:odiff-bin --external:puppeteer-core --outfile=./.smoke.mjs && node ./.smoke.mjs",
+    "dist": "node scripts/bundle-browsers.mjs && electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac",
+    "test": "esbuild tests/unit.test.ts --bundle --platform=node --format=esm --target=node20 --external:playwright --external:@axe-core/playwright --external:@google/genai --external:pngjs --external:pixelmatch --external:lighthouse --external:chrome-launcher --external:pa11y --external:style-dictionary --external:css-tree --external:odiff-bin --external:puppeteer-core --alias:electron=./tests/stubs/electron.ts --outfile=./.test.mjs && node --test ./.test.mjs",
+    "dist:dir": "node scripts/bundle-browsers.mjs && electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
     "release": "npm run typecheck && npm test && npm version",
     "release:patch": "npm run typecheck && npm test && npm version patch && git push --follow-tags",
     "release:minor": "npm run typecheck && npm test && npm version minor && git push --follow-tags"
@@ -70,7 +70,19 @@
     "copyright": "Copyright © 2026 Karthik Nishanth",
     "files": [
       "out/**/*",
-      "resources/**/*"
+      "resources/**/*",
+      "!resources/ms-playwright/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/ms-playwright",
+        "to": "ms-playwright",
+        "filter": ["**/*"]
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/playwright/**",
+      "**/node_modules/playwright-core/**"
     ],
     "directories": {
       "buildResources": "resources",
