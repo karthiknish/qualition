@@ -811,6 +811,15 @@ test('openai model ranking prefers newest full models over mini/nano and drops n
   assert.ok(ranked.indexOf('gpt-5') < ranked.indexOf('gpt-5-mini'))
 })
 
+test('openai ranking treats o-series as its own line, not version 99', () => {
+  // Regression: `n.replace(/^o/, '99.')` made o1 (older) outrank gpt-5.6.
+  const ranked = rankOpenAiModels(['o1', 'gpt-5.6-sol', 'o4-mini', 'gpt-4.1', 'gpt-5-2025-01-31', 'gpt-4o-audio'])
+  assert.equal(ranked[0], 'gpt-5.6-sol', `newest gpt must lead, got ${ranked.join(', ')}`)
+  assert.ok(ranked.indexOf('o4-mini') < ranked.indexOf('o1'), 'o4 must outrank o1')
+  assert.ok(!ranked.includes('gpt-5-2025-01-31'), 'dated snapshots duplicate their alias')
+  assert.ok(!ranked.some((m) => /audio/.test(m)), 'non-text models must be dropped')
+})
+
 test('extractJson survives fenced and chatty model output', () => {
   assert.deepEqual(extractJson('{"findings":[]}'), { findings: [] })
   assert.deepEqual(extractJson('```json\n{"findings":[{"title":"x"}]}\n```').findings.length, 1)

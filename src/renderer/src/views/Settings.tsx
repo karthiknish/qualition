@@ -48,6 +48,8 @@ export default function SettingsView({
   const [version, setVersion] = useState('')
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
   const [checking, setChecking] = useState(false)
+  const [modelQuery, setModelQuery] = useState('')
+  const [visionOnly, setVisionOnly] = useState(false)
 
   const refreshModels = useCallback(async (provider: ProviderId) => {
     setLoadingModels(true)
@@ -98,6 +100,17 @@ export default function SettingsView({
             ? { openrouterModel: m }
             : { geminiModel: m }
     )
+
+  // 300+ models on OpenRouter is unusable without filtering.
+  const providerConfigured =
+    s.provider === 'cursor' ||
+    !!(s.provider === 'openai' ? s.openaiApiKey : s.provider === 'openrouter' ? s.openrouterApiKey : s.geminiApiKey)
+
+  const q = modelQuery.trim().toLowerCase()
+  const visibleModels = models
+    .filter((m) => !visionOnly || m.vision !== false)
+    .filter((m) => !q || m.id.toLowerCase().includes(q) || (m.label ?? '').toLowerCase().includes(q))
+    .slice(0, 120)
 
   const testConnection = async (): Promise<void> => {
     setProbe(null)
@@ -193,12 +206,40 @@ export default function SettingsView({
                 <button onClick={() => refreshModels(s.provider)} className="text-[10px] text-sky-400 hover:underline">
                   {loadingModels ? 'refreshing…' : 'refresh from API'}
                 </button>
-                <span className="text-[10px] text-zinc-600">{models.length} available</span>
+                <span className="text-[10px] text-zinc-600">
+                  {visibleModels.length === models.length
+                    ? `${models.length} available`
+                    : `${visibleModels.length} of ${models.length}`}
+                </span>
               </span>
             }
           >
+            <div className="mb-1.5 flex gap-2">
+              <Input
+                value={modelQuery}
+                onChange={setModelQuery}
+                placeholder={`Search ${models.length} model${models.length === 1 ? '' : 's'}…`}
+              />
+              <button
+                onClick={() => setVisionOnly(!visionOnly)}
+                title="Screenshot critique needs a vision-capable model"
+                className={cx(
+                  'shrink-0 rounded-lg border px-2.5 py-1 text-[11px]',
+                  visionOnly
+                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                    : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                )}
+              >
+                vision only
+              </button>
+            </div>
             <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
-              {models.map((m) => (
+              {visibleModels.length === 0 && (
+                <p className="px-1 py-2 text-[11px] text-zinc-600">
+                  No model matches “{modelQuery}”{visionOnly ? ' with vision support' : ''}.
+                </p>
+              )}
+              {visibleModels.map((m) => (
                 <button
                   key={m.id}
                   onClick={() => setModel(m.id)}
@@ -231,6 +272,13 @@ export default function SettingsView({
               </p>
             )}
           </Field>
+
+          {!providerConfigured && (
+            <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
+              No API key set for {s.provider} — AI critique will be skipped on the next run. Add a key, or switch
+              provider above.
+            </p>
+          )}
 
           <div className="flex items-center gap-2">
             <Button

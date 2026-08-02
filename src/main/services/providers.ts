@@ -63,7 +63,10 @@ const LIST_PRICES: Record<string, [number, number]> = {
   'gpt-5-mini': [0.25, 2],
   'gpt-4.1': [2, 8],
   'gpt-4.1-mini': [0.4, 1.6],
-  'o4-mini': [1.1, 4.4]
+  'gpt-5.6-sol': [5, 30],
+  'gpt-5.6-luna': [0.1, 0.6],
+  'o4-mini': [1.1, 4.4],
+  o3: [2, 8]
 }
 
 function withListPrice(id: string): ModelInfo {
@@ -269,19 +272,42 @@ class GeminiProvider implements Provider {
 
 /* --------------------------------- openai --------------------------------- */
 
-export const OPENAI_FALLBACK_MODELS = ['gpt-5.2', 'gpt-5.1', 'gpt-5', 'gpt-5-mini', 'gpt-4.1', 'o4-mini']
+/**
+ * Used only when no API key is set, since OpenAI has no public model list
+ * without one. Kept current against the live catalogue rather than guessed.
+ */
+export const OPENAI_FALLBACK_MODELS = [
+  'gpt-5.6-sol',
+  'gpt-5.6-luna',
+  'gpt-5.2',
+  'gpt-5.1',
+  'gpt-5',
+  'gpt-5-mini',
+  'gpt-4.1',
+  'o4-mini',
+  'o3'
+]
+
+/** Newest first. o-series is its own generation line, not a 99.x version. */
+function openAiVersion(name: string): number {
+  const oSeries = /^o(\d+)/.exec(name)
+  if (oSeries) return Number(oSeries[1]) * 100
+  const m = /(\d+)(?:\.(\d+))?/.exec(name)
+  return m ? Number(m[1]) * 100 + Number(m[2] ?? 0) : 0
+}
 
 export function rankOpenAiModels(names: string[]): string[] {
   return names
     .filter((n) => /^(gpt-|o\d|chatgpt-)/.test(n))
-    .filter((n) => !/(audio|realtime|tts|whisper|embedding|moderation|image|transcribe|search|dall)/i.test(n))
+    .filter(
+      (n) =>
+        !/(audio|realtime|tts|whisper|embedding|moderation|image|transcribe|search|dall|codex|instruct)/i.test(n)
+    )
+    // Dated snapshots (gpt-5-2025-01-31) duplicate their alias; keep the alias.
+    .filter((n) => !/\d{4}-\d{2}-\d{2}/.test(n))
     .sort((a, b) => {
-      const v = (n: string): number => {
-        const m = /(\d+)(?:\.(\d+))?/.exec(n.replace(/^o/, '99.'))
-        return m ? Number(m[1]) * 100 + Number(m[2] ?? 0) : 0
-      }
       const mini = (n: string): number => (/mini|nano/.test(n) ? 0 : 1)
-      return v(b) - v(a) || mini(b) - mini(a) || a.length - b.length
+      return openAiVersion(b) - openAiVersion(a) || mini(b) - mini(a) || a.length - b.length
     })
 }
 
