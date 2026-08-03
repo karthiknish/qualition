@@ -15,7 +15,7 @@ import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services
 import { deleteCredential, listCredentials, originOf, resolveCredential, saveCredential } from '../src/main/services/vault.js'
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
 import { flowInventory, heuristicFlows, validateFlow } from '../src/main/services/flows.js'
-import { sanitizeSelector } from '../src/main/services/crawler.js'
+import { isDeeperRoute, sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
 import { describeApiError, describeRpcError } from '../src/main/services/apiError.js'
@@ -1563,4 +1563,69 @@ test('applyProductionPresence marks absent selectors as does-not-ship', async ()
   assert.match(out[0].provenance?.note ?? '', /absent on production/i)
   assert.equal(out[1].provenance?.shipsInProduction, false)
   assert.match(out[1].provenance?.note ?? '', /Leaner on production/i)
+})
+
+test('isDeeperRoute recognizes SPA detail paths under list routes', () => {
+  assert.equal(
+    isDeeperRoute('http://localhost:5181/tasks', 'http://localhost:5181/tasks/abc123'),
+    true
+  )
+  assert.equal(
+    isDeeperRoute('http://localhost:5181/agents', 'http://localhost:5181/agents/x/y'),
+    true
+  )
+  assert.equal(isDeeperRoute('http://localhost:5181/tasks', 'http://localhost:5181/tasks'), false)
+  assert.equal(isDeeperRoute('http://localhost:5181/tasks', 'http://localhost:5181/agents/x'), false)
+  assert.equal(isDeeperRoute('http://localhost:5181/', 'http://localhost:5181/tasks'), true)
+})
+
+test('route sweep covers more than a handful of crawled pages', () => {
+  const many = Array.from({ length: 12 }, (_, i) =>
+    page({
+      url: `https://example.com/p${i}`,
+      title: `Page ${i} Product`,
+      controls: [
+        {
+          tag: 'a',
+          type: '',
+          role: '',
+          name: '',
+          text: `Go ${i}`,
+          ariaLabel: '',
+          placeholder: '',
+          href: `/p${i}`,
+          selector: 'a',
+          disabled: false,
+          editable: false
+        }
+      ],
+      sections: [
+        {
+          id: `s${i}`,
+          role: 'content',
+          roleConfidence: 1,
+          label: `P${i}`,
+          selector: 'main',
+          rect: { x: 0, y: 0, width: 800, height: 400 },
+          textPreview: `Unique copy ${i}`,
+          headings: [`Heading ${i}`],
+          ctaLabels: [`Go ${i}`],
+          components: [],
+          stats: {
+            interactiveCount: 1,
+            imageCount: 0,
+            textDensity: 1,
+            distinctBgColors: 1,
+            distinctFontSizes: 1,
+            maxTextWidthPx: 400
+          }
+        }
+      ]
+    })
+  )
+  const flows = heuristicFlows(many)
+  const sweep = flows.find((f) => /Visit every discovered route/i.test(f.name))
+  assert.ok(sweep)
+  const gotos = sweep!.steps.filter((s) => s.action === 'goto')
+  assert.ok(gotos.length >= 10, `expected >=10 gotos in sweep, got ${gotos.length}`)
 })

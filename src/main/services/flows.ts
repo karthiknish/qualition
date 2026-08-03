@@ -257,10 +257,15 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
 
   /* 1. Route sweep — can a user actually reach every page we found? */
   const sweep: FlowStep[] = []
-  for (const page of ok.slice(0, 6)) {
-    sweep.push({ action: 'goto', target: pathOf(page.url), note: page.title })
+  for (const page of ok.slice(0, Math.min(ok.length, 16))) {
+    sweep.push({
+      action: 'goto',
+      target: pathOf(page.url),
+      note: page.title,
+      intent: `Open ${pathOf(page.url)}`
+    })
     const assertion = assertionFor(page)
-    if (assertion) sweep.push({ action: 'assertText', value: assertion })
+    if (assertion) sweep.push({ action: 'assertText', value: assertion, intent: `Confirm “${assertion}”` })
   }
   if (sweep.length >= 2) flows.push({ name: 'Visit every discovered route', steps: sweep })
 

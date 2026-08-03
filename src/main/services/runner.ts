@@ -355,7 +355,27 @@ export async function executeRun(
     /* 2c. deep interaction probe — actually operate the UI */
     if (cfg.useInteractionProbe) {
       const probeViewport = (cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS)[0]
-      for (const page of run.pages.slice(0, 8)) {
+      // Prefer deeper routes (detail pages) — list shells alone miss the real UI.
+      const probeTargets = [...run.pages]
+        .sort((a, b) => {
+          const da = (() => {
+            try {
+              return new URL(a.url).pathname.split('/').filter(Boolean).length
+            } catch {
+              return 0
+            }
+          })()
+          const db = (() => {
+            try {
+              return new URL(b.url).pathname.split('/').filter(Boolean).length
+            } catch {
+              return 0
+            }
+          })()
+          return db - da
+        })
+        .slice(0, 16)
+      for (const page of probeTargets) {
         checkpoint()
         progress('interaction', 44, `Operating controls on ${page.url}`)
         try {

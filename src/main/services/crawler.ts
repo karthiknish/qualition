@@ -229,10 +229,9 @@ export async function capturePage(
       } catch {
         /* long-poll sites never idle */
       }
-      // Trigger lazy content, then return to top for a clean screenshot.
-      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight))
-      await page.waitForTimeout(700)
-      await page.evaluate(() => window.scrollTo(0, 0))
+      // App shells scroll inside overflow panes (not document). Sweep those so
+      // lazy rows hydrate and detail cards exist before we screenshot/extract.
+      await scrollAppShells(page)
       await page.waitForTimeout(400)
 
       // Hide Agentation / Vercel toolbar / similar before we screenshot or walk the DOM.
@@ -464,13 +463,155 @@ function dedupeNetwork(
   return out
 }
 
-/** Breadth-first same-origin crawl. */
+/**
+ * Scroll overflow panes used by app shells, then the document. Window-only
+ * scroll misses list rows that live inside `overflow:auto` main columns.
+ */
+export async function scrollAppShells(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+    const panes = Array.from(document.querySelectorAll('main, [role=main], [class*=layout-content], [class*=scroll]'))
+      .concat(Array.from(document.querySelectorAll('*')))
+      .filter((el, i, arr) => arr.indexOf(el) === i)
+      .filter((el) => {
+        const s = getComputedStyle(el)
+        const oy = s.overflowY
+        return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 48
+      })
+      .slice(0, 6)
+    for (const el of panes) {
+      const top = el.scrollTop
+      el.scrollTop = el.scrollHeight
+      await sleep(280)
+      el.scrollTop = 0
+      await sleep(120)
+      el.scrollTop = top
+    }
+    window.scrollTo(0, document.body.scrollHeight)
+    await sleep(400)
+    window.scrollTo(0, 0)
+  })
+}
+
+/** True when `candidate` is a same-origin path nested under `parent`. */
+export function isDeeperRoute(parent: string, candidate: string): boolean {
+  try {
+    const p = new URL(parent)
+    const c = new URL(candidate)
+    if (p.origin !== c.origin) return false
+    const pp = p.pathname.replace(/\/$/, '') || '/'
+    const cp = c.pathname.replace(/\/$/, '') || '/'
+    if (cp === pp) return false
+    return cp.startsWith(pp === '/' ? '/' : pp + '/')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Many SPAs open detail routes via onClick/navigate() with no `<a href>`.
+ * Click a few cards in the visible main column and collect new URLs.
+ */
+export async function probeInnerRoutes(
+  browser: Browser,
+  listUrl: string,
+  opts: Pick<CaptureOptions, 'storageState' | 'onLog' | 'shouldStop'> & {
+    max?: number
+    viewport?: Viewport
+  }
+): Promise<string[]> {
+  const max = opts.max ?? 2
+  const vp = opts.viewport ?? DEFAULT_VIEWPORTS[0]
+  const found: string[] = []
+  const skipTexts: string[] = []
+  const ctx = await browser.newContext({
+    viewport: { width: vp.width, height: vp.height },
+    bypassCSP: true,
+    ...(opts.storageState ? { storageState: opts.storageState } : {})
+  })
+  const page = await ctx.newPage()
+  try {
+    await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+    await page.waitForTimeout(2500)
+    await scrollAppShells(page)
+    await page.waitForTimeout(400)
+
+    for (let attempt = 0; attempt < max * 4 && found.length < max; attempt++) {
+      if (opts.shouldStop?.()) break
+      const before = page.url()
+      const pt = await page.evaluate((skipped: string[]) => {
+        const mains = Array.from(
+          document.querySelectorAll('main, [role=main], [class*=layout-content]')
+        ).filter((el) => {
+          const r = el.getBoundingClientRect()
+          const s = getComputedStyle(el)
+          return (
+            r.width > 280 &&
+            r.height > 180 &&
+            s.display !== 'none' &&
+            s.visibility !== 'hidden' &&
+            Number(s.opacity) > 0.5
+          )
+        })
+        const main = mains.sort(
+          (a, b) =>
+            b.getBoundingClientRect().width * b.getBoundingClientRect().height -
+            a.getBoundingClientRect().width * a.getBoundingClientRect().height
+        )[0]
+        if (!main) return null
+
+        for (const el of Array.from(main.querySelectorAll('div, article, li, button, a, [role=button], [role=row]'))) {
+          if (el.closest('nav, aside, header, [role=navigation], [role=banner]')) continue
+          const r = el.getBoundingClientRect()
+          const t = (el.textContent ?? '').trim().replace(/\s+/g, ' ')
+          if (r.width < 160 || r.height < 48 || r.height > 200) continue
+          if (r.top < 72 || r.top > window.innerHeight - 40) continue
+          if (t.length < 18 || t.length > 420) continue
+          if (skipped.some((s) => t.includes(s) || s.includes(t.slice(0, 40)))) continue
+          if (
+            /^(all\b|needs you|working|done|failed|start work|search|filter|create|new |show all|sign in)/i.test(
+              t
+            )
+          )
+            continue
+          // Prefer leaf-ish cards over giant wrappers: stop at first mid-size hit.
+          return { x: r.x + Math.min(r.width / 2, 120), y: r.y + Math.min(24, r.height / 3), t: t.slice(0, 80) }
+        }
+        return null
+      }, skipTexts)
+
+      if (!pt) break
+      skipTexts.push(pt.t.slice(0, 48))
+      await page.mouse.click(pt.x, pt.y)
+      await page.waitForTimeout(900)
+      const after = normalize(page.url())
+      if (after !== normalize(before) && isDeeperRoute(listUrl, after)) {
+        if (!found.includes(after)) {
+          found.push(after)
+          opts.onLog?.(`discovered inner route ${after} from ${listUrl}`)
+        }
+        await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        await page.waitForTimeout(1200)
+        await scrollAppShells(page)
+      }
+    }
+  } catch (e) {
+    opts.onLog?.(`inner-route probe failed on ${listUrl}: ${(e as Error).message.slice(0, 160)}`)
+  } finally {
+    await ctx.close().catch(() => {})
+  }
+  return [...new Set(found)]
+}
+
 /**
  * Breadth-first same-origin crawl.
  *
  * `maxPages <= 0` means no page limit: keep going until the site runs out of
  * distinct routes. A wall-clock budget is still honoured so an infinite/
  * generated URL space cannot trap the run forever.
+ *
+ * After each list-depth page, a small click probe discovers detail routes that
+ * SPAs open via navigate() without an `<a href>` (e.g. `/tasks/:id`).
  */
 export async function crawl(
   browser: Browser,
@@ -487,6 +628,8 @@ export async function crawl(
   const unlimited = !maxPages || maxPages <= 0
   const pageLimit = unlimited ? Number.POSITIVE_INFINITY : maxPages
   const deadline = opts.budgetMs ? Date.now() + opts.budgetMs : Number.POSITIVE_INFINITY
+  const INNER_BUDGET = Math.min(16, unlimited ? 16 : Math.max(4, Math.floor(pageLimit / 2)))
+  let innersFound = 0
 
   if (unlimited) opts.onLog?.('crawling every reachable same-origin route (no page limit)')
 
@@ -510,6 +653,27 @@ export async function crawl(
     pages.push(page)
     opts.onPage?.(page)
 
+    // Detail routes often have no href — click a couple of main-column cards.
+    if (innersFound < INNER_BUDGET && depth(url) <= 1 && page.ok && !opts.shouldStop?.()) {
+      const room = Math.min(2, INNER_BUDGET - innersFound)
+      const desktop =
+        (opts.viewports.length ? opts.viewports : DEFAULT_VIEWPORTS).find((v) => !v.isMobile) ??
+        DEFAULT_VIEWPORTS[0]
+      try {
+        const inner = await probeInnerRoutes(browser, page.url, {
+          storageState: opts.storageState,
+          onLog: opts.onLog,
+          max: room,
+          viewport: desktop,
+          shouldStop: opts.shouldStop
+        })
+        innersFound += inner.length
+        page.links = [...new Set([...(page.links ?? []), ...inner])]
+      } catch (e) {
+        opts.onLog?.(`inner discovery skipped: ${(e as Error).message.slice(0, 120)}`)
+      }
+    }
+
     const candidates = page.links
       .map(normalize)
       .filter((l) => sameOrigin(l, startUrl))
@@ -529,7 +693,14 @@ export async function crawl(
     const queuedPaths = new Set(queue.map(pageIdentity))
     const ranked = [...byPath.values()]
       .filter((l) => !queuedPaths.has(pageIdentity(l)))
-      .sort((a, b) => score(b) - score(a) || depth(a) - depth(b) || a.length - b.length)
+      // Prefer deeper product routes (detail pages) slightly over shallow chrome.
+      .sort(
+        (a, b) =>
+          score(b) - score(a) ||
+          (isDeeperRoute(url, b) ? 1 : 0) - (isDeeperRoute(url, a) ? 1 : 0) ||
+          depth(a) - depth(b) ||
+          a.length - b.length
+      )
 
     for (const l of ranked) {
       queue.push(l)
@@ -541,6 +712,8 @@ export async function crawl(
     opts.onLog?.(
       `crawl exhausted the site: ${pages.length} distinct route(s) captured, no further same-origin links found`
     )
+  } else if (innersFound > 0) {
+    opts.onLog?.(`crawl finished with ${innersFound} inner route(s) discovered via card clicks`)
   }
   return pages
 }
