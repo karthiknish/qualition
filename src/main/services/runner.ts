@@ -6,6 +6,8 @@ import { randomUUID } from 'node:crypto'
 import type { Browser } from 'playwright'
 import { capturePage, crawl, launch, runFlow, DEFAULT_VIEWPORTS } from './crawler.js'
 import { auditPage, dedupeFindings, diffFindingsAgainstPrior, fixedFindingsSincePrior, scoreRun, themeSummary } from './audit.js'
+import { auditBrandAcrossProject, auditComponentTheme, inferBrandProfile } from './brandTheme.js'
+import { findingsFromFlowGaps, flowGapsFromMobbin, flowsSuggestedByMobbinGaps } from './flowGaps.js'
 import { critiquePage, critiqueSectionAgainstReferences, finalVerdict, makeCritic, proposeFlows } from './critic.js'
 import { credsFromSettings } from './providers.js'
 import { probeInteractions } from './interaction.js'
@@ -265,9 +267,16 @@ export async function executeRun(
       if (page.cssStats) findings.push(...auditCss(page, page.cssStats, cfg))
       if (page.tokenDictionary) findings.push(...auditTokens(page, page.tokenDictionary, cfg))
     }
+    const brand = inferBrandProfile(run.pages, cfg.productContext)
+    for (const page of run.pages) {
+      findings.push(...auditComponentTheme(page, brand, cfg))
+    }
+    findings.push(...auditBrandAcrossProject(run.pages, brand, cfg))
     run.findings = findings
-    run.themeSummary = themeSummary(run.pages)
-    progress('heuristics', 36, `${findings.length} heuristic finding(s) · ${run.themeSummary}`)
+    run.themeSummary = [themeSummary(run.pages), brand.summary !== 'insufficient brand signal' ? `Brand: ${brand.summary}` : '']
+      .filter(Boolean)
+      .join('\n')
+    progress('heuristics', 36, `${findings.length} heuristic finding(s) · ${run.themeSummary.split('\n')[0]}`)
     await saveRun(run)
 
     /* 2a. Lighthouse ∥ pa11y ∥ visual-diff — independent Chrome / CPU work */
@@ -533,7 +542,15 @@ export async function executeRun(
       try {
         const flowQuery = queryForFlows(detected.archetype, cfg.productContext, run.pages)
         log('info', `Mobbin flow query: ${flowQuery}`)
-        run.references.push(...(await raceCancel(searchFlows(flowQuery, { limit: 2, outDir: assets }))))
+        run.references.push(...(await raceCancel(searchFlows(flowQuery, { limit: 4, outDir: assets }))))
+        const earlyGaps = flowGapsFromMobbin(
+          run.references.filter((r) => r.kind === 'flow'),
+          run.pages,
+          []
+        )
+        if (earlyGaps.length) {
+          log('info', `Mobbin flow gaps (pre-run): ${earlyGaps.map((g) => g.id).join(', ')}`)
+        }
       } catch (e) {
         if (state.cancelled) throw new CancelledError()
         log('warn', `Mobbin flows: ${(e as Error).message}`)
@@ -789,6 +806,27 @@ export async function executeRun(
       if (added) log('info', `Added ${added} list→detail flow(s) for depth coverage`)
     }
 
+    // Mobbin flow references → exercise gaps the product may be missing.
+    {
+      const mobbinFlowGaps = flowGapsFromMobbin(
+        run.references.filter((r) => r.kind === 'flow'),
+        run.pages,
+        []
+      )
+      const suggested = validateFlows(flowsSuggestedByMobbinGaps(mobbinFlowGaps, run.pages), run.pages).filter(
+        (f) => !f.invalid
+      )
+      const covered = new Set(runnable.map((f) => f.name.toLowerCase()))
+      let added = 0
+      for (const s of suggested) {
+        if (covered.has(s.name.toLowerCase())) continue
+        runnable.push({ ...s })
+        covered.add(s.name.toLowerCase())
+        added++
+      }
+      if (added) log('info', `Added ${added} Mobbin-gap flow(s)`)
+    }
+
     if (runnable.length === 0) {
       log('info', 'No runnable flows for this product — skipping the flow phase.')
     }
@@ -847,6 +885,21 @@ export async function executeRun(
       } catch (e) {
         if (state.cancelled) throw new CancelledError()
         log('error', `flow "${flow.name}" crashed: ${(e as Error).message}`)
+      }
+    }
+
+    // After journeys run, call out structural gaps vs Mobbin flow references.
+    {
+      const gaps = flowGapsFromMobbin(
+        run.references.filter((r) => r.kind === 'flow'),
+        run.pages,
+        run.flows
+      )
+      if (gaps.length) {
+        const gapFindings = findingsFromFlowGaps(gaps, cfg.targetUrl)
+        run.findings.push(...gapFindings)
+        log('info', `Mobbin flow gaps: ${gaps.map((g) => g.id).join(', ')}`)
+        progress('flows', 88, `${gaps.length} Mobbin flow gap(s) called out`)
       }
     }
 

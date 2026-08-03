@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { ArrowUpCircle, Download, Loader2, XCircle } from 'lucide-react'
 import type { UpdateStatus } from '../../../shared/types'
 import { api, cx } from '../lib/api'
 
@@ -17,7 +18,7 @@ export default function UpdateBanner(): JSX.Element | null {
   }, [])
 
   if (!status) return null
-  const { state, version, currentVersion, percent, canSelfInstall } = status
+  const { state, version, currentVersion, percent } = status
   if (state === 'idle' || state === 'checking' || state === 'dismissed' || state === 'dev') return null
 
   const isReady = state === 'ready'
@@ -31,11 +32,17 @@ export default function UpdateBanner(): JSX.Element | null {
       <div className="flex items-start gap-3 p-3.5">
         <span
           className={cx(
-            'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[13px]',
+            'mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg',
             isError ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'
           )}
         >
-          {isError ? '!' : '↑'}
+          {isError ? (
+            <XCircle size={15} />
+          ) : busyState ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <ArrowUpCircle size={15} />
+          )}
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[13px] font-medium text-zinc-100">
@@ -78,12 +85,13 @@ export default function UpdateBanner(): JSX.Element | null {
                 setBusy(false)
               }}
               className={cx(
-                'rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors',
+                'inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium transition-colors',
                 busyState
                   ? 'cursor-not-allowed bg-zinc-800 text-zinc-500'
                   : 'bg-zinc-100 text-zinc-900 hover:bg-white'
               )}
             >
+              {!busyState && <Download size={12} />}
               {isError ? 'Retry' : isReady ? 'Restart & install' : 'Download & install'}
             </button>
             <button

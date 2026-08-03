@@ -1402,7 +1402,8 @@ test('queriesForSection prefers component vocabulary over full-page shells', asy
 })
 
 test('gapsFromMobbin surfaces unique missing components', async () => {
-  const { gapsFromMobbin, isFullPageShell, isDetailPath } = await import('../src/main/services/componentGaps.js')
+  const { gapsFromMobbin, isFullPageShell, isDetailPath, componentFamily, pickUniqueComponents } =
+    await import('../src/main/services/componentGaps.js')
   assert.equal(isFullPageShell('dashboard-01', 'registry:block', 'App shell with KPI cards'), true)
   assert.equal(isFullPageShell('dashboard-8', 'registry:block', 'Creator finance desk to clear royalties'), true)
   assert.equal(isFullPageShell('empty', 'registry:ui', 'Empty state'), false)
@@ -1411,6 +1412,25 @@ test('gapsFromMobbin surfaces unique missing components', async () => {
   assert.equal(isDetailPath('/tasks/mn71ejkaq6rbhb9b7fj6hkrnmn8bkm2q'), true)
   assert.equal(isDetailPath('/agents/agt-0007'), true)
   assert.equal(isDetailPath('/settings'), false)
+  assert.equal(componentFamily('navigation-menu4'), 'navigation-menu')
+  assert.equal(componentFamily('command-menu'), 'command-menu')
+  assert.equal(componentFamily('input9'), 'input')
+  const deduped = pickUniqueComponents(
+    [
+      { name: 'command-menu', registry: '@a', description: 'a' },
+      { name: 'command-menu', registry: '@b', description: 'b' },
+      { name: 'navigation-menu4', registry: '@c', description: 'c' },
+      { name: 'navigation-menu2', registry: '@d', description: 'd' },
+      { name: 'button', registry: '@shadcn', description: 'Button' },
+      { name: 'empty-state', registry: '@neon', description: 'Empty' }
+    ],
+    { limit: 5 }
+  )
+  assert.equal(deduped.length, 3)
+  assert.deepEqual(
+    deduped.map((d) => d.name),
+    ['command-menu', 'navigation-menu4', 'empty-state']
+  )
   const gaps = gapsFromMobbin(
     [
       {
@@ -1513,9 +1533,13 @@ test('formatRecommendations prefers unique components over dashboard shells', ()
   assert.ok(text.includes('npx shadcn@latest add empty') || text.includes('@cult-ui/command'))
   assert.equal(text.includes('@shadcnblocks/dashboard-01'), false, 'dashboard shells must be stripped')
   assert.equal(text.includes('@reui/dashboard-8'), false, 'reui dashboard shells must be stripped')
+  assert.equal(text.includes('npx shadcn@latest add button'), false, 'basic button must not be suggested')
   assert.ok(text.includes('Detail/ID routes'), 'detail routes should be called out in context')
   assert.ok(text.includes('do not install a dashboard block'), 'detail guidance for component swaps')
   assert.ok(text.includes('· /'), 'recs should include pathname where applied')
+  // One family only — not three command-menu registries.
+  const commandHits = (text.match(/command-menu|add command\b/gi) ?? []).length
+  assert.ok(commandHits <= 2, `expected at most one command family suggestion, got ${commandHits}`)
 })
 
 /* ------------------------------ fix prompts ------------------------------ */
@@ -1645,9 +1669,22 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
         reason: 'Standardise this content section on registry components.',
         source: 'shadcn',
         items: [
-          { name: 'card', registry: '@shadcn', type: 'registry:ui', description: 'Card', addCommand: 'npx shadcn@latest add card', source: 'shadcn' },
-          { name: 'separator', registry: '@shadcn', type: 'registry:ui', description: 'Separator', addCommand: 'npx shadcn@latest add separator', source: 'shadcn' },
-          { name: 'breadcrumb', registry: '@shadcn', type: 'registry:ui', description: 'Breadcrumb', addCommand: 'npx shadcn@latest add breadcrumb', source: 'shadcn' }
+          {
+            name: 'empty',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Empty',
+            addCommand: 'npx shadcn@latest add empty',
+            source: 'shadcn'
+          },
+          {
+            name: 'breadcrumb',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Breadcrumb',
+            addCommand: 'npx shadcn@latest add breadcrumb',
+            source: 'shadcn'
+          }
         ]
       },
       {
@@ -1656,8 +1693,22 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
         reason: 'Standardise this content section on registry components.',
         source: 'shadcn',
         items: [
-          { name: 'card', registry: '@shadcn', type: 'registry:ui', description: 'Card', addCommand: 'npx shadcn@latest add card', source: 'shadcn' },
-          { name: 'tabs', registry: '@shadcn', type: 'registry:ui', description: 'Tabs', addCommand: 'npx shadcn@latest add tabs', source: 'shadcn' }
+          {
+            name: 'empty',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Empty',
+            addCommand: 'npx shadcn@latest add empty',
+            source: 'shadcn'
+          },
+          {
+            name: 'tabs',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Tabs',
+            addCommand: 'npx shadcn@latest add tabs',
+            source: 'shadcn'
+          }
         ]
       },
       {
@@ -1666,8 +1717,22 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
         reason: 'Nav needs focus and names.',
         source: 'shadcn',
         items: [
-          { name: 'button', registry: '@shadcn', type: 'registry:ui', description: 'Button', addCommand: 'npx shadcn@latest add button', source: 'shadcn' },
-          { name: 'navigation-menu', registry: '@shadcn', type: 'registry:ui', description: 'Nav', addCommand: 'npx shadcn@latest add navigation-menu', source: 'shadcn' }
+          {
+            name: 'button',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Button',
+            addCommand: 'npx shadcn@latest add button',
+            source: 'shadcn'
+          },
+          {
+            name: 'navigation-menu',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Nav',
+            addCommand: 'npx shadcn@latest add navigation-menu',
+            source: 'shadcn'
+          }
         ]
       }
     ],
@@ -1683,10 +1748,12 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
   assert.match(text, /Where: \//)
   assert.doesNotMatch(text, /styles-module__/)
   assert.match(text, /prefer measured interaction-probe and axe/i)
-  // Generic content pack listed once, not twice
-  const cardMentions = [...text.matchAll(/npx shadcn@latest add card/g)]
-  assert.equal(cardMentions.length, 1)
+  // Empty family listed once across content sections; basics like button omitted
+  const emptyMentions = [...text.matchAll(/npx shadcn@latest add empty/g)]
+  assert.equal(emptyMentions.length, 1)
+  assert.doesNotMatch(text, /npx shadcn@latest add button/)
   assert.match(text, /### nav/)
+  assert.match(text, /navigation-menu/)
   assert.match(text, /Execute the root-cause list above in order/)
 })
 
@@ -1847,6 +1914,256 @@ test('auditPage flags product-polish empty/loading/microcopy signals', () => {
   assert.ok(findings.some((f) => /Vague empty copy/i.test(f.title)))
   assert.ok(findings.some((f) => /Generic CTA labels/i.test(f.title)))
   assert.ok(findings.some((f) => /skeleton.*without reserved height/i.test(f.title)))
+})
+
+test('component theme audit flags inconsistent button radii and brand drift', async () => {
+  const { inferBrandProfile, auditComponentTheme, auditBrandAcrossProject } = await import(
+    '../src/main/services/brandTheme.js'
+  )
+  const themed = (url: string, buttonBgs: string[], radius: string[]): CapturedPage =>
+    page({
+      url,
+      tokens: {
+        colors: buttonBgs.map((value) => ({ value, usage: 8, role: 'bg' as const })),
+        fontFamilies: [{ value: 'Brand Sans', usage: 40 }],
+        fontSizes: [{ value: 14, usage: 10 }],
+        fontWeights: [{ value: 500, usage: 10 }],
+        radii: radius.map((value) => ({ value, usage: 6 })),
+        shadows: [],
+        spacing: [],
+        transitions: []
+      },
+      signals: {
+        componentTheme: [
+          ...buttonBgs.map((bg, i) => ({
+            kind: 'button',
+            tag: 'button',
+            text: `Action ${i}`,
+            bg,
+            color: 'rgb(255,255,255)',
+            borderRadius: radius[i] ?? radius[0] ?? '8px',
+            fontFamily: i === 0 ? 'Brand Sans' : 'Comic Sans MS',
+            fontSize: '14px',
+            fontWeight: '600',
+            borderColor: 'rgb(0,0,0)'
+          })),
+          {
+            kind: 'input',
+            tag: 'input',
+            text: '',
+            bg: 'rgb(255,255,255)',
+            color: 'rgb(0,0,0)',
+            borderRadius: '2px',
+            fontFamily: 'Brand Sans',
+            fontSize: '14px',
+            fontWeight: '400',
+            borderColor: 'rgb(200,200,200)'
+          },
+          {
+            kind: 'input',
+            tag: 'input',
+            text: '',
+            bg: 'rgb(255,255,255)',
+            color: 'rgb(0,0,0)',
+            borderRadius: '2px',
+            fontFamily: 'Brand Sans',
+            fontSize: '14px',
+            fontWeight: '400',
+            borderColor: 'rgb(200,200,200)'
+          },
+          {
+            kind: 'input',
+            tag: 'input',
+            text: '',
+            bg: 'rgb(255,255,255)',
+            color: 'rgb(0,0,0)',
+            borderRadius: '2px',
+            fontFamily: 'Brand Sans',
+            fontSize: '14px',
+            fontWeight: '400',
+            borderColor: 'rgb(200,200,200)'
+          }
+        ]
+      }
+    })
+
+  const home = themed('https://example.com/', ['rgb(20, 80, 200)', 'rgb(220, 40, 40)', 'rgb(40, 180, 80)'], [
+    '8px',
+    '20px',
+    '0px'
+  ])
+  const other = page({
+    url: 'https://example.com/settings',
+    tokens: {
+      colors: [{ value: 'rgb(255, 0, 128)', usage: 12, role: 'bg' }],
+      fontFamilies: [{ value: 'Arial', usage: 40 }],
+      fontSizes: [{ value: 14, usage: 10 }],
+      fontWeights: [{ value: 400, usage: 10 }],
+      radii: [{ value: '32px', usage: 8 }],
+      shadows: [],
+      spacing: [],
+      transitions: []
+    },
+    signals: {
+      componentTheme: [
+        {
+          kind: 'button',
+          tag: 'button',
+          text: 'Save',
+          bg: 'rgb(255, 0, 128)',
+          color: 'rgb(255,255,255)',
+          borderRadius: '32px',
+          fontFamily: 'Arial',
+          fontSize: '14px',
+          fontWeight: '600',
+          borderColor: 'rgb(0,0,0)'
+        },
+        {
+          kind: 'button',
+          tag: 'button',
+          text: 'Cancel',
+          bg: 'rgb(255, 0, 128)',
+          color: 'rgb(255,255,255)',
+          borderRadius: '32px',
+          fontFamily: 'Arial',
+          fontSize: '14px',
+          fontWeight: '600',
+          borderColor: 'rgb(0,0,0)'
+        },
+        {
+          kind: 'button',
+          tag: 'button',
+          text: 'Ok',
+          bg: 'rgb(200, 0, 100)',
+          color: 'rgb(255,255,255)',
+          borderRadius: '32px',
+          fontFamily: 'Arial',
+          fontSize: '14px',
+          fontWeight: '600',
+          borderColor: 'rgb(0,0,0)'
+        }
+      ]
+    }
+  })
+  const brand = inferBrandProfile([home, other], 'B2B analytics, dark UI')
+  assert.ok(brand.fonts.some((f) => /Brand Sans/i.test(f)))
+  const local = auditComponentTheme(home, brand, config)
+  assert.ok(local.some((f) => /button components use .* different radii/i.test(f.title)))
+  assert.ok(local.some((f) => /competing accent/i.test(f.title)))
+  const cross = auditBrandAcrossProject([home, other], brand, { ...config, brutality: 'ruthless' })
+  assert.ok(
+    cross.some((f) => /Brand typeface missing|Brand accent does not travel|Corner radius language/i.test(f.title)),
+    `expected cross-page brand findings, got ${cross.map((f) => f.title).join(' | ') || '(none)'}`
+  )
+})
+
+test('flowGapsFromMobbin surfaces missing success and confirm steps', async () => {
+  const { flowGapsFromMobbin, findingsFromFlowGaps, flowsSuggestedByMobbinGaps } = await import(
+    '../src/main/services/flowGaps.js'
+  )
+  const list = page({
+    url: 'https://tool.internal/tasks',
+    title: 'Tasks',
+    controls: [
+      {
+        tag: 'input',
+        type: 'search',
+        role: '',
+        text: '',
+        placeholder: 'Search tasks…',
+        label: '',
+        ariaLabel: '',
+        name: 'q',
+        href: '',
+        testId: ''
+      },
+      {
+        tag: 'button',
+        type: '',
+        role: 'button',
+        text: 'Save',
+        placeholder: '',
+        label: '',
+        ariaLabel: '',
+        name: '',
+        href: '',
+        testId: ''
+      }
+    ],
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'Tasks',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1200, height: 800 },
+        textPreview: 'Your tasks',
+        headings: ['Tasks'],
+        ctaLabels: ['Save'],
+        components: [],
+        stats: {
+          interactiveCount: 2,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 2,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  const detail = page({
+    url: 'https://tool.internal/tasks/abc123',
+    title: 'Task',
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'Detail',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1200, height: 800 },
+        textPreview: 'Detail',
+        headings: ['Intake'],
+        ctaLabels: [],
+        components: [],
+        stats: {
+          interactiveCount: 0,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 1,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  const gaps = flowGapsFromMobbin(
+    [
+      {
+        query: 'complete task',
+        kind: 'flow',
+        title: 'Clear queue with confirmation',
+        appName: 'Linear',
+        description:
+          'User reviews changes, confirms submit, sees success toast, and can undo. Search then open detail record.'
+      }
+    ],
+    [list, detail],
+    []
+  )
+  assert.ok(gaps.some((g) => g.id === 'confirm-before-submit'))
+  assert.ok(gaps.some((g) => g.id === 'success-feedback'))
+  assert.ok(gaps.some((g) => g.id === 'undo'))
+  assert.ok(gaps.some((g) => g.id === 'search-open-detail'))
+  const findings = findingsFromFlowGaps(gaps, 'https://tool.internal/')
+  assert.ok(findings.every((f) => f.category === 'flow' && f.id.startsWith('flow-gap-')))
+  const suggested = flowsSuggestedByMobbinGaps(gaps, [list, detail])
+  assert.ok(
+    suggested.some((f) => /search then open detail/i.test(f.name)),
+    `expected search→detail suggestion, got ${suggested.map((f) => f.name).join(' | ') || '(none)'}`
+  )
 })
 
 test('pickSectionsForRecommendations skips mature unique sections', async () => {

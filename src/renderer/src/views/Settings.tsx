@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { Eye, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type {
   IntegrationStatus,
   ProviderId,
@@ -9,22 +10,31 @@ import type {
   UpdateStatus
 } from '../../../shared/types'
 import { api, cx } from '../lib/api'
+import { BrandLogo, type BrandId } from '../components/BrandLogo'
 import { Button, Field, Input, PageHeader, Panel } from '../components/ui'
 
-const PROVIDERS: { id: ProviderId; label: string; blurb: string; vision: boolean }[] = [
-  { id: 'gemini', label: 'Gemini', blurb: 'Google AI Studio key. Vision + JSON schema.', vision: true },
-  { id: 'openai', label: 'OpenAI', blurb: 'Responses API. Vision + structured output. Any compatible base URL.', vision: true },
+const PROVIDERS: { id: ProviderId; label: string; blurb: string; vision: boolean; brand: BrandId }[] = [
+  { id: 'gemini', label: 'Gemini', blurb: 'Google AI Studio key. Vision + JSON schema.', vision: true, brand: 'gemini' },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    blurb: 'Responses API. Vision + structured output. Any compatible base URL.',
+    vision: true,
+    brand: 'openai'
+  },
   {
     id: 'openrouter',
     label: 'OpenRouter',
     blurb: 'One key, 300+ models from every vendor. Live per-model pricing.',
-    vision: true
+    vision: true,
+    brand: 'openrouter'
   },
   {
     id: 'cursor',
     label: 'Cursor',
     blurb: 'Local cursor-agent CLI, your existing subscription. Text-only — screenshots are replaced by measured evidence.',
-    vision: false
+    vision: false,
+    brand: 'cursor'
   }
 ]
 
@@ -156,6 +166,7 @@ export default function SettingsView({
               )}
             >
               <div className="flex items-center gap-1.5">
+                <BrandLogo id={p.brand} size={15} title={p.label} />
                 <span className="text-[13px] text-zinc-100">{p.label}</span>
                 {!p.vision && <span className="rounded bg-amber-500/15 px-1 text-[9px] uppercase text-amber-300">no vision</span>}
               </div>
@@ -219,7 +230,11 @@ export default function SettingsView({
             label={
               <span className="flex items-center gap-2">
                 Model
-                <button onClick={() => refreshModels(s.provider)} className="text-[10px] text-sky-400 hover:underline">
+                <button
+                  onClick={() => refreshModels(s.provider)}
+                  className="inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
+                >
+                  <RefreshCw size={10} className={loadingModels ? 'animate-spin' : undefined} />
                   {loadingModels ? 'refreshing…' : 'refresh from API'}
                 </button>
                 <span className="text-[10px] text-zinc-600">
@@ -240,12 +255,13 @@ export default function SettingsView({
                 onClick={() => setVisionOnly(!visionOnly)}
                 title="Screenshot critique needs a vision-capable model"
                 className={cx(
-                  'shrink-0 rounded-lg border px-2.5 py-1 text-[11px]',
+                  'inline-flex shrink-0 items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px]',
                   visionOnly
                     ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
                     : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'
                 )}
               >
+                <Eye size={12} />
                 vision only
               </button>
             </div>
@@ -372,7 +388,14 @@ export default function SettingsView({
         </div>
       </Panel>
 
-      <Panel title="Component sources">
+      <Panel
+        title={
+          <span className="inline-flex items-center gap-1.5">
+            <BrandLogo id="shadcn" size={13} />
+            Component sources
+          </span>
+        }
+      >
         <p className="mb-2 text-[11px] leading-snug text-zinc-500">
           <span className="text-zinc-300">Shoogle</span> (mcp.shoogle.dev) is queried for unique components
           Mobbin references show that the audited UI is missing — not whole dashboard shells. First-party{' '}
@@ -381,7 +404,8 @@ export default function SettingsView({
         </p>
         <div className="mb-3 space-y-1 text-[12px]">
           <div className={cx(status?.shoogle.ok ? 'text-emerald-400' : 'text-amber-400')}>Shoogle: {status?.shoogle.detail}</div>
-          <div className={cx(status?.shadcn.ok ? 'text-emerald-400' : 'text-amber-400')}>
+          <div className={cx('flex items-center gap-1.5', status?.shadcn.ok ? 'text-emerald-400' : 'text-amber-400')}>
+            <BrandLogo id="shadcn" size={12} />
             shadcn: {status?.shadcn.detail} · {status?.shadcn.registries.join(', ')}
           </div>
         </div>
@@ -396,6 +420,7 @@ export default function SettingsView({
               setRegUrl('')
             }}
           >
+            <Plus size={14} />
             Add
           </Button>
         </div>
@@ -404,7 +429,11 @@ export default function SettingsView({
             <li key={r.url} className="flex items-center justify-between gap-2 rounded-md border border-zinc-800 px-2 py-1 text-[12px]">
               <span className="text-zinc-300">{r.name}</span>
               <span className="truncate text-zinc-600">{r.url}</span>
-              <button onClick={() => save({ extraRegistries: s.extraRegistries.filter((x) => x.url !== r.url) })} className="text-red-400">
+              <button
+                onClick={() => save({ extraRegistries: s.extraRegistries.filter((x) => x.url !== r.url) })}
+                className="inline-flex items-center gap-1 text-red-400"
+              >
+                <Trash2 size={12} />
                 remove
               </button>
             </li>

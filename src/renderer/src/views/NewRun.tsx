@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
+import { MousePointerClick, Play, SquareLibrary, Sparkles } from 'lucide-react'
 import type { FlowStep, IntegrationStatus, Run, RunConfig, SavedCredential, Settings, Viewport } from '../../../shared/types'
 import { api, cx } from '../lib/api'
 import { isValidTarget, normalizeTargetUrl, parseIgnorePages } from '../../../shared/url'
+import { BrandLogo, providerBrand } from '../components/BrandLogo'
 import { Button, Chip, Input, PageHeader, Panel, Segmented, Toggle } from '../components/ui'
 
 const BRUTALITY: { id: RunConfig['brutality']; label: string; hint: string }[] = [
@@ -222,30 +224,41 @@ export default function NewRun({
           checked={probe}
           onChange={setProbe}
           label="Deep interaction probe"
+          icon={<MousePointerClick size={14} className="text-zinc-400" />}
           hint="Hover, focus, keyboard and safe-click every control; overlays, escape, focus traps and empty-form validation"
         />
         <Toggle
           checked={useMobbin}
           onChange={setUseMobbin}
           label="Mobbin references"
+          icon={<SquareLibrary size={14} className="text-zinc-400" />}
           hint={status?.mobbin.ok ? 'Auth reused from local MCP setup' : 'Not authenticated — will be skipped'}
         />
         <Toggle
           checked={useShadcn}
           onChange={setUseShadcn}
           label="Component replacements"
+          icon={<BrandLogo id="shadcn" size={14} />}
           hint={status?.shoogle.ok ? 'Shoogle + shadcn for missing Mobbin-matched components' : 'shadcn only — Shoogle unreachable'}
         />
         <Toggle
           checked={useGemini}
           onChange={setUseGemini}
           label="AI critique"
+          icon={
+            providerBrand(settings?.provider) ? (
+              <BrandLogo id={providerBrand(settings?.provider)!} size={14} />
+            ) : (
+              <Sparkles size={14} className="text-zinc-400" />
+            )
+          }
           hint={status?.model.ok ? `${status.model.id} · ${status.model.model} ready` : `${status?.model.id ?? 'model'} not configured — set it in Settings`}
         />
         <Toggle
           checked={useLighthouse}
           onChange={setUseLighthouse}
           label="Lighthouse"
+          icon={<BrandLogo id="chrome" size={14} title="Chrome / Lighthouse" />}
           hint="Perf, accessibility, best-practices and SEO via a separate Chrome pass — slowest independent tool"
         />
       </div>
@@ -386,6 +399,7 @@ assertText Check your inbox`}
             )}
           </div>
           <Button variant="primary" size="lg" onClick={start} disabled={!valid || busy}>
+            <Play size={15} fill="currentColor" className="opacity-90" />
             {busy ? 'Starting…' : 'Run audit'}
           </Button>
         </div>

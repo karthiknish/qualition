@@ -167,15 +167,17 @@ export function Bar({ value, className }: { value: number; className?: string })
 
 export function Empty({
   children,
-  title
+  title,
+  icon
 }: {
   children: ReactNode
   title?: string
+  icon?: ReactNode
 }): JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center px-4 py-14 text-center">
-      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900/60 text-zinc-600">
-        <span className="text-lg leading-none">·</span>
+      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-800 bg-zinc-900/60 text-zinc-500">
+        {icon ?? <span className="text-lg leading-none">·</span>}
       </div>
       {title && <p className="text-[13px] font-medium text-zinc-300">{title}</p>}
       <div className={cx('max-w-sm text-[13px] leading-relaxed text-zinc-500', title && 'mt-1')}>{children}</div>
@@ -187,12 +189,14 @@ export function Toggle({
   checked,
   onChange,
   label,
-  hint
+  hint,
+  icon
 }: {
   checked: boolean
   onChange: (v: boolean) => void
   label: string
   hint?: string
+  icon?: ReactNode
 }): JSX.Element {
   return (
     <button
@@ -218,8 +222,11 @@ export function Toggle({
           )}
         />
       </span>
-      <span>
-        <span className="block text-[13px] text-zinc-100">{label}</span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5 text-[13px] text-zinc-100">
+          {icon}
+          {label}
+        </span>
         {hint && <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">{hint}</span>}
       </span>
     </button>

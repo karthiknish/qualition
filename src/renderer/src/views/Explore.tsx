@@ -1,6 +1,8 @@
 import { useState } from 'react'
+import { BookOpen, Copy, Search, SquareLibrary } from 'lucide-react'
 import type { MobbinReference } from '../../../shared/types'
 import { api, cx } from '../lib/api'
+import { BrandLogo } from '../components/BrandLogo'
 import { Button, Empty, Input, PageHeader, Panel } from '../components/ui'
 
 export default function Explore({ runId }: { runId?: string }): JSX.Element {
@@ -45,7 +47,12 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
 
       <div className="grid grid-cols-2 gap-4 animate-fade-up">
         <Panel
-          title="Mobbin"
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              <SquareLibrary size={13} className="text-zinc-400" />
+              Mobbin
+            </span>
+          }
           right={
             <div className="flex rounded-lg border border-zinc-800 p-0.5">
               {(['screen', 'section'] as const).map((k) => (
@@ -70,6 +77,7 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
               placeholder="Describe one screen or section in plain language"
             />
             <Button variant="primary" onClick={searchMobbin} disabled={mBusy}>
+              <Search size={14} />
               {mBusy ? '…' : 'Search'}
             </Button>
           </div>
@@ -95,14 +103,24 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
             ))}
           </div>
           {refs.length === 0 && !mBusy && (
-            <Empty title="No references yet">Search shipped UI to compare against.</Empty>
+            <Empty title="No references yet" icon={<SquareLibrary size={18} />}>
+              Search shipped UI to compare against.
+            </Empty>
           )}
         </Panel>
 
-        <Panel title="Component registry">
+        <Panel
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              <BrandLogo id="shadcn" size={13} />
+              Component registry
+            </span>
+          }
+        >
           <div className="flex gap-2">
             <Input value={rQuery} onChange={setRQuery} placeholder="e.g. data table, pricing, sidebar, otp" />
             <Button variant="primary" onClick={searchRegistry} disabled={rBusy}>
+              <Search size={14} />
               {rBusy ? '…' : 'Search'}
             </Button>
           </div>
@@ -121,9 +139,10 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
                   </span>
                   <button
                     onClick={() => navigator.clipboard.writeText(i.addCommand)}
-                    className="rounded-lg border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
+                    className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
                     title="Copy install command"
                   >
+                    <Copy size={10} />
                     copy
                   </button>
                 </div>
@@ -131,8 +150,9 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
                 {i.docs && (
                   <button
                     onClick={() => api.openExternal(i.docs)}
-                    className="mt-1.5 text-[10px] text-sky-400 hover:underline"
+                    className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
                   >
+                    <BookOpen size={10} />
                     docs
                   </button>
                 )}
@@ -140,7 +160,9 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
             ))}
           </ul>
           {items.length === 0 && (
-            <Empty title="No components yet">Find the primitive that should replace hand-rolled markup.</Empty>
+            <Empty title="No components yet" icon={<BrandLogo id="shadcn" size={18} />}>
+              Find the primitive that should replace hand-rolled markup.
+            </Empty>
           )}
         </Panel>
       </div>

@@ -257,6 +257,7 @@ WHAT MAKES A GOOD FLOW HERE: go *deep* into the product. Prefer journeys that:
 1. Open a list/index route, then goto a nested detail/ID route from the inventory (e.g. /tasks → /tasks/<id>), assert the detail, interact with a control there.
 2. Fill a real field, assert something changed, then navigate onward.
 3. Chain 3+ clicks with an assertText after each so a dead control is caught at the exact step.
+4. When possible, mirror steps common in polished product flows: search→open, confirm before submit, land on success feedback.
 
 Sidebar-only hops (Overview → Tasks → Review with no detail open) are weak — include at least 2 flows that visit a nested detail route when the inventory lists any.
 

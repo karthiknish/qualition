@@ -8,7 +8,7 @@
  */
 import type { ComponentRecommendation, Finding, Run, Severity } from '../../shared/types.js'
 import { sortFindingsForBrief } from './audit.js'
-import { isDetailPath, isFullPageShell } from './componentGaps.js'
+import { componentFamily, isDetailPath, isFullPageShell, isBasicPrimitive } from './componentGaps.js'
 
 const SEVERITY_ORDER: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
 
@@ -296,7 +296,7 @@ export function formatRecommendations(
   findings: Finding[]
 ): string[] {
   const out: string[] = []
-  const seenCommands = new Set<string>()
+  const seenFamilies = new Set<string>()
   let genericPackEmitted = false
 
   const themeHints = findings
@@ -315,20 +315,20 @@ export function formatRecommendations(
     if (item.source === 'shoogle') s += 12
     if (item.registry && item.registry !== '@shadcn') s += 4
     if (item.type === 'registry:ui') s += 6
-    if (/button|label|input|form|field|checkbox|dialog|sheet|dropdown|navigation|focus|alert|empty|command|skeleton|toast|table|pagination/.test(n) && themeHints.match(new RegExp(n.split('-')[0] || n, 'i'))) {
+    if (/empty|command|sheet|breadcrumb|toast|skeleton|pagination|chart|dialog/.test(n) && themeHints.match(new RegExp(n.split('-')[0] || n, 'i'))) {
       s += 3
     }
-    if (/button|label|dialog|sheet|checkbox|form|field|empty|command/.test(n) && /button|label|focus|overlay|form|checkbox|aria|empty|command/i.test(themeHints)) {
-      s += 2
-    }
-    if (GENERIC_CONTENT_COMPONENTS.has(n)) s -= 4
+    if (isBasicPrimitive(n)) s -= 20
+    if (GENERIC_CONTENT_COMPONENTS.has(componentFamily(n))) s -= 4
+    // Prefer unversioned / clearer names over input9 / navigation-menu4 clones.
+    if (/[-_]?\d+$/.test(n)) s -= 6
     return s
   }
 
   const usable = recs
     .map((r) => ({
       ...r,
-      items: r.items.filter((i) => !isFullPageShell(i.name, i.type, i.description))
+      items: r.items.filter((i) => !isFullPageShell(i.name, i.type, i.description) && !isBasicPrimitive(i.name))
     }))
     .filter((r) => r.items.length > 0)
 
@@ -356,8 +356,9 @@ export function formatRecommendations(
     const items = group
       .flatMap((g) => g.items)
       .filter((i) => {
-        if (seenCommands.has(i.addCommand)) return false
-        if (role === 'content' && GENERIC_CONTENT_COMPONENTS.has(i.name) && i.source !== 'shoogle') {
+        const fam = componentFamily(i.name)
+        if (seenFamilies.has(fam)) return false
+        if (role === 'content' && GENERIC_CONTENT_COMPONENTS.has(fam) && i.source !== 'shoogle') {
           if (genericPackEmitted) return false
         }
         return true
@@ -366,17 +367,18 @@ export function formatRecommendations(
 
     const unique: typeof items = []
     for (const i of items) {
-      if (seenCommands.has(i.addCommand)) continue
-      if (role === 'content' && GENERIC_CONTENT_COMPONENTS.has(i.name) && i.source !== 'shoogle') {
+      const fam = componentFamily(i.name)
+      if (seenFamilies.has(fam)) continue
+      if (role === 'content' && GENERIC_CONTENT_COMPONENTS.has(fam) && i.source !== 'shoogle') {
         if (genericPackEmitted) continue
       }
-      seenCommands.add(i.addCommand)
+      seenFamilies.add(fam)
       unique.push(i)
-      if (unique.length >= 5) break
+      if (unique.length >= 3) break
     }
     if (!unique.length) continue
 
-    if (role === 'content' && unique.some((i) => GENERIC_CONTENT_COMPONENTS.has(i.name) && i.source !== 'shoogle')) {
+    if (role === 'content' && unique.some((i) => GENERIC_CONTENT_COMPONENTS.has(componentFamily(i.name)) && i.source !== 'shoogle')) {
       genericPackEmitted = true
     }
 
@@ -451,6 +453,13 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
     )
   }
   if (run.themeSummary) out.push(`- Detected design language: ${run.themeSummary.split('\n')[0]}`)
+  const brandLine = run.themeSummary?.split('\n').find((l) => /^Brand:/i.test(l))
+  if (brandLine) {
+    out.push(`- ${brandLine}`)
+    out.push(
+      '- Brand awareness: keep component-level theme (button/input/nav radii, type, accents) aligned with that brand across every audited page.'
+    )
+  }
 
   const css = run.pages.find((p) => p.cssStats)?.cssStats
   if (css) {
@@ -513,7 +522,7 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
     out.push('')
     out.push('## Suggested component replacements')
     out.push(
-      'Unique missing widgets inferred from Mobbin references (and Shoogle/shadcn registries). Prefer small composable components over full-page shells. Duplicates across similar sections are listed once; pathnames show where each role applied.'
+      'Unique missing widgets inferred from Mobbin gaps. One recommendation per component family (not three registries of the same menu). Basics you already use (button, input, form, table) are omitted. Prefer the single listed add command.'
     )
     if (detailPaths.length) {
       out.push(
@@ -578,6 +587,25 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
       out.push(
         `For visual/structural reference on the same section types, the audit pulled shipped UI from: ${refs.join(', ')}. Match their information hierarchy, not their branding.`
       )
+    }
+    const flowRefs = run.references.filter((r) => r.kind === 'flow')
+    if (flowRefs.length) {
+      out.push(
+        `Mobbin flow references: ${flowRefs
+          .map((r) => r.appName || r.title)
+          .filter(Boolean)
+          .slice(0, 6)
+          .join(', ')}. Prefer closing product gaps those flows cover (confirm, success feedback, search→detail) over inventing new chrome.`
+      )
+    }
+  }
+
+  const mobbinFlowGaps = run.findings.filter((f) => /^flow-gap-/.test(f.id))
+  if (mobbinFlowGaps.length) {
+    out.push('')
+    out.push('## Gaps vs Mobbin flows')
+    for (const f of mobbinFlowGaps.slice(0, 8)) {
+      out.push(`- **[${f.id}] ${f.title}** — ${trimEvidence(f.detail, 220)} → ${f.fix}`)
     }
   }
 

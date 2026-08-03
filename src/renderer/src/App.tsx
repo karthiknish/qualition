@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import {
+  Compass,
+  FileBarChart2,
+  History,
+  Radar,
+  Settings as SettingsIcon,
+  SquareLibrary
+} from 'lucide-react'
 import type { IntegrationStatus, Run, RunProgress } from '../../shared/types'
 import { api, cx, formatDuration } from './lib/api'
+import { BrandLogo, providerBrand, type BrandId } from './components/BrandLogo'
 import NewRun from './views/NewRun'
 import Runs from './views/Runs'
 import Report from './views/Report'
@@ -10,12 +20,12 @@ import UpdateBanner from './components/UpdateBanner'
 
 type View = 'new' | 'runs' | 'report' | 'explore' | 'settings'
 
-const NAV: { id: View; label: string; hint: string }[] = [
-  { id: 'new', label: 'New audit', hint: 'Point it at a URL' },
-  { id: 'runs', label: 'Runs', hint: 'History' },
-  { id: 'report', label: 'Report', hint: 'Findings & fixes' },
-  { id: 'explore', label: 'Explore', hint: 'Mobbin + registry' },
-  { id: 'settings', label: 'Settings', hint: 'Models & MCP' }
+const NAV: { id: View; label: string; hint: string; icon: LucideIcon }[] = [
+  { id: 'new', label: 'New audit', hint: 'Point it at a URL', icon: Radar },
+  { id: 'runs', label: 'Runs', hint: 'History', icon: History },
+  { id: 'report', label: 'Report', hint: 'Findings & fixes', icon: FileBarChart2 },
+  { id: 'explore', label: 'Explore', hint: 'Mobbin + registry', icon: Compass },
+  { id: 'settings', label: 'Settings', hint: 'Models & MCP', icon: SettingsIcon }
 ]
 
 export default function App(): JSX.Element {
@@ -73,6 +83,8 @@ export default function App(): JSX.Element {
     setView('report')
   }
 
+  const modelBrand = providerBrand(status?.model.id)
+
   return (
     <div className="flex h-full flex-col bg-zinc-950 text-zinc-100">
       <UpdateBanner />
@@ -96,11 +108,31 @@ export default function App(): JSX.Element {
           )}
         </div>
         <div className="no-drag flex items-center gap-1.5">
-          <StatusPill ok={status?.playwright.ok} label="browser" detail={status?.playwright.detail} />
-          <StatusPill ok={status?.mobbin.ok} label="mobbin" detail={status?.mobbin.detail} />
+          <StatusPill
+            ok={status?.playwright.ok}
+            label="browser"
+            detail={status?.playwright.detail}
+            brand="playwright"
+          />
+          <StatusPill
+            ok={status?.mobbin.ok}
+            label="mobbin"
+            detail={status?.mobbin.detail}
+            icon={<SquareLibrary size={11} strokeWidth={1.75} />}
+          />
           <StatusPill ok={status?.shoogle.ok} label="shoogle" detail={status?.shoogle.detail} />
-          <StatusPill ok={status?.shadcn.ok} label="shadcn" detail={status?.shadcn.detail} />
-          <StatusPill ok={status?.model.ok} label={status?.model.id ?? 'model'} detail={status?.model.detail} />
+          <StatusPill
+            ok={status?.shadcn.ok}
+            label="shadcn"
+            detail={status?.shadcn.detail}
+            brand="shadcn"
+          />
+          <StatusPill
+            ok={status?.model.ok}
+            label={status?.model.id ?? 'model'}
+            detail={status?.model.detail}
+            brand={modelBrand ?? undefined}
+          />
         </div>
       </header>
 
@@ -108,6 +140,7 @@ export default function App(): JSX.Element {
         <nav className="flex w-56 shrink-0 flex-col gap-1 border-r border-zinc-800/80 bg-zinc-950/40 p-3">
           {NAV.map((n) => {
             const active = view === n.id
+            const Icon = n.icon
             return (
               <button
                 key={n.id}
@@ -120,8 +153,19 @@ export default function App(): JSX.Element {
                 {active && (
                   <span className="absolute inset-y-2 left-0 w-0.5 rounded-full bg-zinc-100" />
                 )}
-                <span className="block text-[13px] font-medium">{n.label}</span>
-                <span className={cx('block text-[11px]', active ? 'text-zinc-500' : 'text-zinc-600')}>{n.hint}</span>
+                <span className="flex items-center gap-2">
+                  <Icon
+                    size={15}
+                    strokeWidth={1.75}
+                    className={cx('shrink-0', active ? 'text-zinc-100' : 'text-zinc-500 group-hover:text-zinc-300')}
+                  />
+                  <span className="min-w-0">
+                    <span className="block text-[13px] font-medium">{n.label}</span>
+                    <span className={cx('block text-[11px]', active ? 'text-zinc-500' : 'text-zinc-600')}>
+                      {n.hint}
+                    </span>
+                  </span>
+                </span>
               </button>
             )
           })}
@@ -204,7 +248,19 @@ export default function App(): JSX.Element {
   )
 }
 
-function StatusPill({ ok, label, detail }: { ok?: boolean; label: string; detail?: string }): JSX.Element {
+function StatusPill({
+  ok,
+  label,
+  detail,
+  brand,
+  icon
+}: {
+  ok?: boolean
+  label: string
+  detail?: string
+  brand?: BrandId
+  icon?: JSX.Element
+}): JSX.Element {
   return (
     <span
       title={detail}
@@ -217,12 +273,18 @@ function StatusPill({ ok, label, detail }: { ok?: boolean; label: string; detail
             : 'border-red-500/25 bg-red-500/10 text-red-300'
       )}
     >
-      <span
-        className={cx(
-          'h-1.5 w-1.5 rounded-full',
-          ok ? 'bg-emerald-400' : ok === false ? 'bg-red-400' : 'bg-zinc-600'
-        )}
-      />
+      {brand ? (
+        <BrandLogo id={brand} size={11} className="opacity-90" />
+      ) : icon ? (
+        icon
+      ) : (
+        <span
+          className={cx(
+            'h-1.5 w-1.5 rounded-full',
+            ok ? 'bg-emerald-400' : ok === false ? 'bg-red-400' : 'bg-zinc-600'
+          )}
+        />
+      )}
       {label}
     </span>
   )

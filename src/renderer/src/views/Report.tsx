@@ -1,8 +1,25 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import type { LucideIcon } from 'lucide-react'
+import {
+  AlertTriangle,
+  Clipboard,
+  Columns3,
+  Diff,
+  FileDown,
+  FolderOpen,
+  GitBranch,
+  LayoutDashboard,
+  Monitor,
+  MousePointerClick,
+  Palette,
+  Replace as ReplaceIcon,
+  ScrollText
+} from 'lucide-react'
 import type { CapturedPage, Finding, FlowResult, Run, RunProgress, Severity } from '../../../shared/types'
 import { api, CATEGORY_LABEL, cx, formatDuration, gradeColor, SEVERITY_COLOR } from '../lib/api'
 import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
+import { BrandLogo } from '../components/BrandLogo'
 
 type Tab =
   | 'overview'
@@ -15,17 +32,18 @@ type Tab =
   | 'tokens'
   | 'diffs'
   | 'log'
-const TABS: Tab[] = [
-  'overview',
-  'findings',
-  'replace',
-  'screens',
-  'sections',
-  'interactions',
-  'flows',
-  'tokens',
-  'diffs',
-  'log'
+
+const TAB_META: { id: Tab; icon: LucideIcon }[] = [
+  { id: 'overview', icon: LayoutDashboard },
+  { id: 'findings', icon: AlertTriangle },
+  { id: 'replace', icon: ReplaceIcon },
+  { id: 'screens', icon: Monitor },
+  { id: 'sections', icon: Columns3 },
+  { id: 'interactions', icon: MousePointerClick },
+  { id: 'flows', icon: GitBranch },
+  { id: 'tokens', icon: Palette },
+  { id: 'diffs', icon: Diff },
+  { id: 'log', icon: ScrollText }
 ]
 const SEV_ORDER: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
 
@@ -105,9 +123,11 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           <CopyPrompt runId={run.id} />
           <Button size="sm" onClick={() => api.exportRun(run.id)}>
+            <FileDown size={13} />
             Export markdown
           </Button>
           <Button size="sm" variant="ghost" onClick={() => api.revealRun(run.id)}>
+            <FolderOpen size={13} />
             Open files
           </Button>
         </div>
@@ -143,17 +163,18 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
 
       <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
         <div className="flex gap-0.5 overflow-x-auto">
-          {TABS.map((t) => (
+          {TAB_META.map(({ id: t, icon: Icon }) => (
             <button
               key={t}
               onClick={() => setTab(t)}
               className={cx(
-                '-mb-px shrink-0 border-b-2 px-3 py-2.5 text-[13px] capitalize transition-colors',
+                '-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[13px] capitalize transition-colors',
                 tab === t
                   ? 'border-zinc-100 text-zinc-100'
                   : 'border-transparent text-zinc-500 hover:text-zinc-300'
               )}
             >
+              <Icon size={13} strokeWidth={1.75} className={tab === t ? 'text-zinc-200' : 'text-zinc-600'} />
               {t}
             </button>
           ))}
@@ -308,6 +329,7 @@ function CopyPrompt({ runId, sectionId, label = 'Copy fix prompt' }: { runId: st
         aria-expanded={open}
         aria-haspopup="menu"
       >
+        <Clipboard size={13} />
         {copied ?? label}
       </Button>
       {open &&
@@ -412,7 +434,14 @@ function Overview({ run }: { run: Run }): JSX.Element {
 
       <div className="col-span-2 space-y-4">
         {run.lighthouse ? (
-          <Panel title="Lighthouse">
+          <Panel
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <BrandLogo id="chrome" size={13} title="Lighthouse" />
+                Lighthouse
+              </span>
+            }
+          >
             <div className="grid grid-cols-4 gap-3">
               {(
                 [
@@ -446,12 +475,26 @@ function Overview({ run }: { run: Run }): JSX.Element {
             )}
           </Panel>
         ) : run.lighthouseNote ? (
-          <Panel title="Lighthouse">
+          <Panel
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <BrandLogo id="chrome" size={13} title="Lighthouse" />
+                Lighthouse
+              </span>
+            }
+          >
             <Empty>{run.lighthouseNote}</Empty>
           </Panel>
         ) : null}
         {run.geminiNotes && (
-          <Panel title="Executive read · Gemini">
+          <Panel
+            title={
+              <span className="inline-flex items-center gap-1.5">
+                <BrandLogo id="gemini" size={13} title="Gemini" />
+                Executive read · Gemini
+              </span>
+            }
+          >
             <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-zinc-200">{run.geminiNotes}</p>
           </Panel>
         )}
@@ -644,7 +687,11 @@ function Flows({ run }: { run: Run }): JSX.Element {
   const [filter, setFilter] = useState<'all' | 'fail' | 'pass' | 'skipped'>('all')
   const [open, setOpen] = useState<string | null>(null)
 
-  if (run.flows.length === 0) return <Empty>No flows were replayed.</Empty>
+  const mobbinGaps = run.findings.filter((f) => /^flow-gap-/.test(f.id))
+
+  if (run.flows.length === 0 && mobbinGaps.length === 0) {
+    return <Empty>No flows were replayed.</Empty>
+  }
 
   const brokenFindings = run.findings.filter(
     (f) => f.category === 'flow' && /^flow-\d+$/.test(f.id)
@@ -666,6 +713,30 @@ function Flows({ run }: { run: Run }): JSX.Element {
         <Stat label="Not run" value={String(counts.skipped)} />
         <Stat label="Deep journeys" value={String(counts.deep)} sub="list→detail or 3+ interactions" />
       </div>
+
+      {mobbinGaps.length > 0 && (
+        <Panel
+          title="Gaps vs Mobbin flows"
+          right={<span className="text-[11px] text-zinc-500">{mobbinGaps.length}</span>}
+        >
+          <p className="mb-2 text-[11px] leading-relaxed text-zinc-500">
+            Patterns in Mobbin flow references that this product’s crawl and journeys did not show.
+          </p>
+          <ul className="space-y-2">
+            {mobbinGaps.map((f) => (
+              <li key={f.id} className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={SEVERITY_COLOR[f.severity]}>{f.severity}</Badge>
+                  <span className="text-[12px] text-zinc-100">{f.title}</span>
+                  <Badge className="border-zinc-700 bg-zinc-900 text-zinc-500">{f.id}</Badge>
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-zinc-400">{f.detail}</p>
+                <p className="mt-1 text-[11px] text-emerald-300/90">→ {f.fix}</p>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      )}
 
       {counts.fail > 0 && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-red-100/90">

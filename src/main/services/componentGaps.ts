@@ -272,6 +272,121 @@ export function isFullPageShell(name: string, type?: string, description?: strin
   return false
 }
 
+/**
+ * Canonical family for dedupe: command-menu / command-menu-1 / navigation-menu4
+ * → one slot. Avoids dumping three registries of the same primitive.
+ */
+export function componentFamily(name: string): string {
+  let n = name.toLowerCase().trim()
+  // Strip trailing version digits: navigation-menu4, input9, dashboard-01
+  n = n.replace(/[-_]?\d+$/, '')
+  // Common aliases
+  if (/^cmdk$|^command(-menu|-palette|-dialog)?$/.test(n)) return 'command-menu'
+  if (/^nav(igation)?(-menu|-bar)?$/.test(n)) return 'navigation-menu'
+  if (/^empty(-state)?$/.test(n)) return 'empty-state'
+  if (/^sonner$|^toast$/.test(n)) return 'toast'
+  if (/^alert-dialog$|^alertdialog$/.test(n)) return 'alert-dialog'
+  if (/^dropdown(-menu)?$/.test(n)) return 'dropdown-menu'
+  if (/^hover-card$|^hovercard$/.test(n)) return 'hover-card'
+  if (/^input-otp$|^inputotp$/.test(n)) return 'input-otp'
+  if (/^scroll-area$|^scrollarea$/.test(n)) return 'scroll-area'
+  if (/^aspect-ratio$|^aspectratio$/.test(n)) return 'aspect-ratio'
+  if (/^toggle-group$|^togglegroup$/.test(n)) return 'toggle-group'
+  return n || name.toLowerCase()
+}
+
+/** Primitives almost every shadcn app already has — not useful replacement advice. */
+const BASIC_PRIMITIVES = new Set([
+  'button',
+  'label',
+  'input',
+  'textarea',
+  'form',
+  'field',
+  'checkbox',
+  'radio-group',
+  'select',
+  'switch',
+  'separator',
+  'card',
+  'badge',
+  'avatar',
+  'skeleton',
+  'table',
+  'item',
+  'aspect-ratio',
+  'scroll-area'
+])
+
+export function isBasicPrimitive(name: string): boolean {
+  return BASIC_PRIMITIVES.has(componentFamily(name))
+}
+
+/** True when the live section already shows this family (tags, CTAs, copy). */
+export function alreadyOnSection(section: PageSection, family: string): boolean {
+  const blob = sectionBlob(section)
+  const fam = componentFamily(family)
+  const present: Record<string, RegExp> = {
+    button: /\bbutton\b|\bcta\b/,
+    input: /\binput\b|\btext field\b|\bplaceholder\b/,
+    form: /\bform\b/,
+    label: /\blabel\b/,
+    checkbox: /\bcheckbox\b/,
+    select: /\bselect\b|\bdropdown\b/,
+    table: /\btable\b|\bgrid\b/,
+    card: /\bcard\b/,
+    badge: /\bbadge\b|\bchip\b|\bpill\b/,
+    separator: /\bseparator\b|\bdivider\b/,
+    skeleton: /\bskeleton\b|\bshimmer\b|\banimate-pulse\b/,
+    'empty-state': /\bempty\b|\bno (results|data|items)\b/,
+    'command-menu': /\bcommand\b|\bpalette\b|\bcmdk\b/,
+    'navigation-menu': /\bnavigation\b|\bnav menu\b/,
+    sheet: /\bsheet\b|\bdrawer\b/,
+    dialog: /\bdialog\b|\bmodal\b/,
+    toast: /\btoast\b|\bsonner\b/,
+    breadcrumb: /\bbreadcrumb\b/,
+    tabs: /\btab\b/,
+    pagination: /\bpagination\b/,
+    chart: /\bchart\b|\bsparkline\b/
+  }
+  if (section.components.some((c) => componentFamily(c.tag) === fam || c.tag === fam)) return true
+  const re = present[fam]
+  return re ? re.test(blob) : blob.includes(fam.replace(/-/g, ' '))
+}
+
+/**
+ * Keep the best item per component family. Drops basic primitives unless they
+ * are an explicit Mobbin gap and not already on the section.
+ */
+export function pickUniqueComponents<
+  T extends { name: string; registry?: string; source?: string; description?: string; type?: string }
+>(
+  items: T[],
+  opts: {
+    section?: PageSection
+    gapFamilies?: Set<string>
+    limit?: number
+    allowBasic?: boolean
+  } = {}
+): T[] {
+  const limit = opts.limit ?? 3
+  const gapFamilies = opts.gapFamilies ?? new Set<string>()
+  const out: T[] = []
+  const seen = new Set<string>()
+
+  for (const it of items) {
+    if (isFullPageShell(it.name, it.type, it.description)) continue
+    const fam = componentFamily(it.name)
+    if (seen.has(fam)) continue
+    if (opts.section && alreadyOnSection(opts.section, fam) && !gapFamilies.has(fam)) continue
+    if (isBasicPrimitive(it.name) && !opts.allowBasic && !gapFamilies.has(fam)) continue
+    seen.add(fam)
+    out.push(it)
+    if (out.length >= limit) break
+  }
+  return out
+}
+
 /** Path looks like a detail/id route (/tasks/:id, /agents/agt-0007). */
 export function isDetailPath(pathname: string): boolean {
   const parts = pathname.split('/').filter(Boolean)

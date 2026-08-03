@@ -13,6 +13,7 @@
  */
 import { McpClient } from './mcpClient.js'
 import { discoverMcpServers } from './credentials.js'
+import { componentFamily, isFullPageShell } from './componentGaps.js'
 import type { SectionRole } from '../../shared/types.js'
 
 const DEFAULT_URL = 'https://mcp.shoogle.dev/mcp'
@@ -171,7 +172,8 @@ export async function shoogleForSection(
 
 async function shoogleForQueries(queries: string[], perQuery: number): Promise<ShoogleItem[]> {
   const out: ShoogleItem[] = []
-  const seen = new Set<string>()
+  const seenArgs = new Set<string>()
+  const seenFamilies = new Set<string>()
   let hardFail = 0
   for (const q of queries) {
     let items: ShoogleItem[] = []
@@ -184,11 +186,12 @@ async function shoogleForQueries(queries: string[], perQuery: number): Promise<S
       continue
     }
     for (const it of items) {
-      const key = it.addCommandArgument
-      if (!seen.has(key)) {
-        seen.add(key)
-        out.push(it)
-      }
+      if (isFullPageShell(it.name, it.type, it.description)) continue
+      const fam = componentFamily(it.name)
+      if (seenFamilies.has(fam) || seenArgs.has(it.addCommandArgument)) continue
+      seenFamilies.add(fam)
+      seenArgs.add(it.addCommandArgument)
+      out.push(it)
     }
     if (out.length >= perQuery * 2) break
   }

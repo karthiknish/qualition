@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { FileText, FolderOpen, MoreHorizontal, RefreshCw, Trash2 } from 'lucide-react'
 import type { Run } from '../../../shared/types'
 import { api, cx, formatDuration, gradeColor } from '../lib/api'
 import { Badge, Button, Empty, PageHeader, Panel } from '../components/ui'
@@ -20,6 +21,7 @@ export default function Runs({
         description="Every audit kept on this machine — open a report, export markdown, or clear a run."
         actions={
           <Button size="sm" onClick={onRefresh}>
+            <RefreshCw size={13} />
             Refresh
           </Button>
         }
@@ -27,7 +29,9 @@ export default function Runs({
 
       <Panel bodyClassName="p-2" className="animate-fade-up">
         {runs.length === 0 ? (
-          <Empty title="No audits yet">Start one from New audit — results land here.</Empty>
+          <Empty title="No audits yet" icon={<FileText size={18} />}>
+            Start one from New audit — results land here.
+          </Empty>
         ) : (
           <ul className="space-y-1">
             {runs.map((r) => (
@@ -103,18 +107,19 @@ function RunRow({
         </Button>
         <div className="relative">
           <Button size="sm" variant="ghost" onClick={() => setMenu(!menu)}>
-            ···
+            <MoreHorizontal size={14} />
           </Button>
           {menu && (
             <>
               <div className="fixed inset-0 z-10" onClick={() => setMenu(false)} />
-              <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+              <div className="absolute right-0 z-20 mt-1 w-40 overflow-hidden rounded-xl border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
                 <MenuItem
                   onClick={() => {
                     void api.exportRun(r.id)
                     setMenu(false)
                   }}
                 >
+                  <FileText size={12} />
                   Export markdown
                 </MenuItem>
                 <MenuItem
@@ -123,6 +128,7 @@ function RunRow({
                     setMenu(false)
                   }}
                 >
+                  <FolderOpen size={12} />
                   Reveal files
                 </MenuItem>
                 <MenuItem
@@ -133,6 +139,7 @@ function RunRow({
                     onRefresh()
                   }}
                 >
+                  <Trash2 size={12} />
                   Delete
                 </MenuItem>
               </div>
@@ -157,7 +164,7 @@ function MenuItem({
     <button
       onClick={onClick}
       className={cx(
-        'block w-full px-3 py-1.5 text-left text-[12px] hover:bg-zinc-800',
+        'flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] hover:bg-zinc-800',
         danger ? 'text-red-300' : 'text-zinc-200'
       )}
     >

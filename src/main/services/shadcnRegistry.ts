@@ -11,7 +11,7 @@
  * Extra registries (registry.json / index.json shaped) can be added in Settings.
  */
 import { shoogleForSection, shoogleAddCommand } from './shoogle.js'
-import { gapsFromMobbin, isFullPageShell } from './componentGaps.js'
+import { gapsFromMobbin, isFullPageShell, pickUniqueComponents, componentFamily } from './componentGaps.js'
 import type { ComponentRecommendation, MobbinReference, PageSection, SectionRole } from '../../shared/types.js'
 
 export interface RegistryItem {
@@ -47,20 +47,20 @@ const BLOCKS: { name: string; description: string; roles: SectionRole[] }[] = [
 
 /** Which primitives a given section role is normally built from. */
 const ROLE_COMPONENTS: Record<SectionRole, string[]> = {
-  nav: ['navigation-menu', 'sheet', 'button', 'dropdown-menu', 'separator'],
-  hero: ['button', 'badge', 'aspect-ratio', 'input-group'],
-  features: ['card', 'item', 'badge', 'separator', 'hover-card'],
-  pricing: ['card', 'badge', 'toggle-group', 'button', 'tooltip', 'separator'],
-  testimonials: ['card', 'avatar', 'carousel', 'quote' as string],
-  logos: ['carousel', 'aspect-ratio', 'separator'],
-  faq: ['accordion', 'collapsible', 'separator'],
-  cta: ['button', 'card', 'input-group', 'badge'],
-  form: ['form', 'field', 'input', 'label', 'select', 'checkbox', 'button', 'input-otp', 'sonner'],
-  table: ['table', 'pagination', 'dropdown-menu', 'checkbox', 'input', 'skeleton', 'empty'],
-  gallery: ['carousel', 'aspect-ratio', 'card', 'dialog', 'scroll-area'],
-  stats: ['card', 'chart', 'progress', 'badge'],
-  footer: ['separator', 'navigation-menu', 'button', 'input-group'],
-  content: ['card', 'button', 'separator']
+  nav: ['navigation-menu', 'breadcrumb', 'sheet'],
+  hero: ['badge', 'input-group'],
+  features: ['hover-card', 'item'],
+  pricing: ['toggle-group', 'tooltip'],
+  testimonials: ['carousel', 'avatar'],
+  logos: ['carousel'],
+  faq: ['accordion', 'collapsible'],
+  cta: ['input-group', 'badge'],
+  form: ['field', 'input-otp', 'sonner'],
+  table: ['pagination', 'empty', 'skeleton'],
+  gallery: ['carousel', 'dialog'],
+  stats: ['chart', 'progress'],
+  footer: ['navigation-menu'],
+  content: ['empty', 'command', 'tabs', 'sheet', 'sonner']
 }
 
 let indexCache: { at: number; items: RegistryItem[] } | null = null
@@ -187,12 +187,16 @@ export async function recommendForSection(
 
   const gaps = gapsFromMobbin(mobbinRefs, section)
   const gapQueries = gaps.map((g) => g.query)
+  const gapFamilies = new Set(
+    gaps.flatMap((g) => [...(g.shadcn ?? []).map(componentFamily), componentFamily(g.query.replace(/\s+/g, '-'))])
+  )
 
   if (useShoogle) {
     shoogleAttempted = true
     try {
-      for (const it of await shoogleForSection(section.role, section, problems, 8, gapQueries)) {
-        if (isFullPageShell(it.name, it.type, it.description)) continue
+      const raw = await shoogleForSection(section.role, section, problems, 10, gapQueries)
+      const unique = pickUniqueComponents(raw, { section, gapFamilies, limit: 3 })
+      for (const it of unique) {
         out.push({
           name: it.name,
           registry: it.registry,
@@ -203,16 +207,31 @@ export async function recommendForSection(
           source: 'shoogle'
         })
         shoogleCount++
-        if (shoogleCount >= 5) break
       }
     } catch {
       /* Shoogle down — shadcn fallback below still runs */
     }
   }
 
-  const shadcnSlots = Math.min(5, 6 - out.length)
-  const fallback = await recommendFromShadcn(section, extra, shadcnSlots, gaps)
-  out.push(...fallback)
+  // Only fill remaining slots from first-party when we have real Mobbin gaps
+  // or Shoogle returned nothing — never pad with button/input/form noise.
+  const shadcnSlots = Math.max(0, 3 - out.length)
+  if (shadcnSlots > 0 && (gaps.length > 0 || shoogleCount === 0)) {
+    const fallback = await recommendFromShadcn(section, extra, shadcnSlots, gaps)
+    const more = pickUniqueComponents(fallback, {
+      section,
+      gapFamilies,
+      limit: shadcnSlots,
+      allowBasic: false
+    })
+    // Skip families already chosen from Shoogle.
+    const taken = new Set(out.map((i) => componentFamily(i.name)))
+    for (const it of more) {
+      if (taken.has(componentFamily(it.name))) continue
+      out.push(it)
+      taken.add(componentFamily(it.name))
+    }
+  }
 
   const gapNote =
     gaps.length > 0
@@ -226,9 +245,9 @@ export async function recommendForSection(
 
   const communityNote =
     shoogleCount > 0
-      ? 'Community registry hits below are unique widgets, not full page shells. '
+      ? 'One best match per component family (not multiple registries of the same widget). '
       : shoogleAttempted
-        ? 'Shoogle returned no component hits — falling back to first-party shadcn. '
+        ? 'Shoogle returned no unique component hits — falling back to first-party shadcn for gaps only. '
         : ''
 
   const reason =
@@ -241,8 +260,8 @@ export async function recommendForSection(
     pageUrl,
     sectionRole: section.role,
     reason: reason.trim(),
-    source: shoogleCount > 0 && fallback.length > 0 ? 'mixed' : shoogleCount > 0 ? 'shoogle' : 'shadcn',
-    items: out.slice(0, 8)
+    source: shoogleCount > 0 && out.some((i) => i.source === 'shadcn') ? 'mixed' : shoogleCount > 0 ? 'shoogle' : 'shadcn',
+    items: out.slice(0, 3)
   }
 }
 
@@ -372,33 +391,34 @@ async function recommendFromShadcn(
     if (!picks.some((p) => p.name === it.name && p.registry === it.registry)) picks.push(it)
   }
 
-  // Mobbin gaps first — the missing unique primitives.
+  // Mobbin gaps first — the missing unique primitives only.
   for (const g of gaps) {
     for (const n of g.shadcn) push(byName.get(`@shadcn/${n}`))
-    for (const it of searchRegistry(items, g.query, 3)) push(it)
+    for (const it of searchRegistry(items, g.query, 2)) push(it)
   }
 
-  // Thin role-matched a11y / structure primitives (never full shells).
-  const roleList = (ROLE_COMPONENTS[section.role] ?? []).filter((n) =>
-    /^(button|label|input|checkbox|dialog|sheet|dropdown-menu|navigation-menu|form|field|select|empty|skeleton|table|pagination|command|sonner|tabs|breadcrumb)$/.test(
-      n
-    )
-  )
-  for (const n of roleList) push(byName.get(`@shadcn/${n}`))
+  // Role hints only when we still have slots — skip basics like button/input.
+  if (picks.length < limit) {
+    for (const n of ROLE_COMPONENTS[section.role] ?? []) {
+      push(byName.get(`@shadcn/${n}`))
+    }
+  }
 
-  const textQuery = [section.label, ...section.headings.slice(0, 2), ...section.ctaLabels.slice(0, 2)].join(' ')
-  for (const it of searchRegistry(items, textQuery, 3)) push(it)
   for (const b of BLOCKS.filter((b) => b.roles.includes(section.role))) push(byName.get(`@shadcn/${b.name}`))
 
-  return picks.slice(0, limit).map((it) => ({
-    name: it.name,
-    registry: it.registry,
-    type: it.type,
-    description: it.description ?? '',
-    addCommand: addCommand(it),
-    docs: it.docs,
-    source: 'shadcn' as const
-  }))
+  const gapFamilies = new Set(gaps.flatMap((g) => (g.shadcn ?? []).map(componentFamily)))
+  return pickUniqueComponents(
+    picks.map((it) => ({
+      name: it.name,
+      registry: it.registry,
+      type: it.type,
+      description: it.description ?? '',
+      addCommand: addCommand(it),
+      docs: it.docs,
+      source: 'shadcn' as const
+    })),
+    { section, gapFamilies, limit }
+  )
 }
 
 export async function registryStatus(

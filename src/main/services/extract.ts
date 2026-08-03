@@ -918,6 +918,46 @@ export const extractFn = function (): any {
     disabledWithoutAria
   }
 
+  /* ---------------- component-level theme samples ---------------------- */
+  // Sample computed theme per control kind so the audit can catch buttons
+  // that use a different radius/font than the rest of the system, and brand
+  // accents that drift across pages.
+  const sampleTheme = (selector: string, kind: string, limit = 10): any[] => {
+    const out: any[] = []
+    for (const el of Array.from(document.querySelectorAll(selector))
+      .filter((e) => isVisible(e) && !isDevChrome(e))
+      .slice(0, limit * 3)) {
+      const r = el.getBoundingClientRect()
+      if (r.width < 6 || r.height < 6) continue
+      const cs = getComputedStyle(el)
+      const text = clamp((el.textContent ?? (el as HTMLInputElement).value ?? '').replace(/\s+/g, ' ').trim(), 36)
+      out.push({
+        kind,
+        tag: el.tagName.toLowerCase(),
+        text,
+        bg: norm(cs.backgroundColor),
+        color: norm(cs.color),
+        borderRadius: (cs.borderRadius || '').split(' ')[0] || '0px',
+        fontFamily: (cs.fontFamily || '').split(',')[0].replace(/['"]/g, '').trim(),
+        fontSize: cs.fontSize,
+        fontWeight: cs.fontWeight,
+        borderColor: norm(cs.borderTopColor || cs.borderColor)
+      })
+      if (out.length >= limit) break
+    }
+    return out
+  }
+  const componentTheme = [
+    ...sampleTheme('button, [role=button], input[type=submit], input[type=button]', 'button'),
+    ...sampleTheme(
+      'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]), textarea, select',
+      'input'
+    ),
+    ...sampleTheme('nav a, [role=navigation] a, aside a, [class*=sidebar i] a', 'nav'),
+    ...sampleTheme('[class*=badge i], [class*=chip i], [data-slot=badge]', 'badge'),
+    ...sampleTheme('[class*=card i], [data-slot=card]', 'card')
+  ]
+
   return {
     title: document.title,
     tokens,
@@ -954,6 +994,7 @@ export const extractFn = function (): any {
       ),
       layout,
       polish,
+      componentTheme,
       // Must skip Agentation / Vercel toolbar / etc. — they stay in the DOM
       // after hideDevChrome (display:none) and would otherwise inflate this
       // count into a false "icon-only buttons" finding on every page.
