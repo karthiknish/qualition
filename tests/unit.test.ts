@@ -23,6 +23,7 @@ import {
   summarizePremiumCraft
 } from '../src/main/services/premiumCraft.js'
 import { plainTextFromMarkdown } from '../src/shared/plainText.js'
+import { isDetailPath } from '../src/main/services/componentGaps.js'
 import { isDeeperRoute, sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
