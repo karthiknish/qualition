@@ -26,7 +26,7 @@ import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
 import { applyProductionPresence, partitionProductFindings } from './provenance.js'
-import { critiquePriorityScore, interactionProbeScore, isKitSpecimenPath } from './brokenUi.js'
+import { interactionProbeScore, isKitSpecimenPath, pickCritiqueTargets } from './brokenUi.js'
 import { summarizePremiumCraft, type PremiumDimensionScores } from './premiumCraft.js'
 import { mapPool } from './pool.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
@@ -582,19 +582,13 @@ export async function executeRun(
       const PAGE_BUDGET = 12
       const SECTION_BUDGET = 12
       const CRITIQUE_CONCURRENCY = 3
-      const ranked = [...run.pages].sort((a, b) => {
-        const score = (p: typeof a) =>
-          critiquePriorityScore(
-            p,
-            run.findings.filter((f) => f.pageUrl === p.url).length
-          )
-        return score(b) - score(a)
-      })
-      const targetsForCritique = ranked.slice(0, PAGE_BUDGET)
-      if (ranked.length > PAGE_BUDGET) {
+      const findingCountFor = (p: (typeof run.pages)[0]) =>
+        run.findings.filter((f) => f.pageUrl === p.url).length
+      const targetsForCritique = pickCritiqueTargets(run.pages, findingCountFor, PAGE_BUDGET, 3)
+      if (run.pages.length > PAGE_BUDGET) {
         log(
           'info',
-          `Critiquing the ${PAGE_BUDGET} pages with the most findings; skipping ${ranked.length - PAGE_BUDGET} quieter page(s) to keep the run bounded`
+          `Critiquing ${PAGE_BUDGET} pages (incl. reserved product lists); skipping ${run.pages.length - PAGE_BUDGET} quieter page(s) to keep the run bounded`
         )
       }
       progress(

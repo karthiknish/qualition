@@ -16,7 +16,7 @@ import { deleteCredential, listCredentials, originOf, resolveCredential, saveCre
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
 import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow, isChromeAssert, isSiteChromeLabel, isPlaceholderAssert, isSoft404Assert } from '../src/main/services/flows.js'
 import { auditImpeccableSlop } from '../src/main/services/impeccableSlop.js'
-import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath, isSoft404Shell } from '../src/main/services/brokenUi.js'
+import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath, isSoft404Shell, isProductListPath, pickCritiqueTargets } from '../src/main/services/brokenUi.js'
 import { clampCategory } from '../src/main/services/critic.js'
 import {
   auditPremiumCraft,
@@ -1456,7 +1456,79 @@ test('critiquePriorityScore boosts quiet product list pages', () => {
     }))
   })
   const kit = page({ url: 'https://app.test/primitives', title: 'Primitives' })
+  const busyDetail = page({
+    url: 'https://app.test/tasks/abc123',
+    title: 'Task',
+    controls: Array.from({ length: 4 }, () => ({
+      tag: 'button', type: 'button', role: 'button', text: 'Act',
+      placeholder: '', label: '', ariaLabel: '', name: '', href: '', testId: ''
+    }))
+  })
+  assert.equal(isProductListPath(quiet.url), true)
   assert.ok(critiquePriorityScore(quiet, 0) > critiquePriorityScore(kit, 2))
+  // Quiet lists must outrank mediocre detail pages with a handful of findings.
+  assert.ok(critiquePriorityScore(quiet, 0) > critiquePriorityScore(busyDetail, 5))
+})
+
+test('pickCritiqueTargets reserves quiet product list seats', () => {
+  const counts = new Map<string, number>()
+  const pages = [
+    page({
+      url: 'https://app.test/agents/dead-id',
+      title: 'Agent not found',
+      signals: {
+        brokenUi: {
+          soft404: true,
+          soft404Evidence: 'Agent not found',
+          clippedTextNodes: 0,
+          overlappingTextPairs: 0,
+          mainContentChars: 40
+        }
+      } as CapturedPage['signals']
+    }),
+    page({
+      url: 'https://app.test/knowledge',
+      signals: {
+        brokenUi: {
+          soft404: false,
+          clippedTextNodes: 21,
+          overlappingTextPairs: 0,
+          mainContentChars: 800
+        }
+      } as CapturedPage['signals']
+    }),
+    ...Array.from({ length: 10 }, (_, i) =>
+      page({ url: `https://app.test/tasks/detail-${i}`, title: `Task ${i}` })
+    ),
+    page({
+      url: 'https://app.test/spend',
+      title: 'Spend',
+      controls: Array.from({ length: 20 }, () => ({
+        tag: 'button', type: 'button', role: 'button', text: 'F',
+        placeholder: '', label: '', ariaLabel: '', name: '', href: '', testId: ''
+      }))
+    }),
+    page({
+      url: 'https://app.test/traces',
+      title: 'Traces',
+      controls: Array.from({ length: 20 }, () => ({
+        tag: 'button', type: 'button', role: 'button', text: 'F',
+        placeholder: '', label: '', ariaLabel: '', name: '', href: '', testId: ''
+      }))
+    }),
+    page({ url: 'https://app.test/primitives', title: 'Primitives' })
+  ]
+  counts.set('https://app.test/agents/dead-id', 1)
+  counts.set('https://app.test/knowledge', 5)
+  for (let i = 0; i < 10; i++) counts.set(`https://app.test/tasks/detail-${i}`, 8)
+
+  const picked = pickCritiqueTargets(pages, (p) => counts.get(p.url) ?? 0, 12, 3)
+  const paths = picked.map((p) => new URL(p.url).pathname)
+  assert.ok(paths.includes('/spend'), `expected /spend reserved, got ${paths.join(', ')}`)
+  assert.ok(paths.includes('/traces'), `expected /traces reserved, got ${paths.join(', ')}`)
+  assert.ok(paths.includes('/agents/dead-id'), 'soft-404 still included')
+  assert.equal(paths.includes('/primitives'), false)
+  assert.equal(picked.length, 12)
 })
 
 test('clampCategory maps invented AI labels onto scored categories', () => {

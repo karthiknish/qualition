@@ -220,37 +220,85 @@ export function isKitSpecimenPath(url: string): boolean {
   }
 }
 
+function pathParts(url: string): string[] {
+  try {
+    return new URL(url).pathname.split('/').filter(Boolean)
+  } catch {
+    return url.split('/').filter(Boolean)
+  }
+}
+
+/** Top-level product surfaces (/spend, /traces, /tasks, home) — not kit, not detail IDs. */
+export function isProductListPath(url: string): boolean {
+  if (isKitSpecimenPath(url)) return false
+  return pathParts(url).length <= 1
+}
+
 /** Score used to pick which pages get AI critique (higher = sooner). */
 export function critiquePriorityScore(page: CapturedPage, findingCount: number): number {
   let score = findingCount + brokenUiCritiqueBoost(page)
   if (isKitSpecimenPath(page.url)) score -= 220
-  try {
-    const parts = new URL(page.url).pathname.split('/').filter(Boolean)
-    if (parts.length >= 2) score += 15
-    // Quiet product surfaces still need eyes — spend/traces/outcomes were getting 0.
-    if (!isKitSpecimenPath(page.url) && findingCount < 3) {
-      const controls = page.controls?.length ?? 0
-      if (controls >= 4) score += 35
-      if (parts.length === 1) score += 30
-      if (parts.length === 0) score += 20 // home
+  const parts = pathParts(page.url)
+  if (parts.length >= 2) score += 15
+  const controls = page.controls?.length ?? 0
+  // Quiet product surfaces must compete with soft-404 (+500) and clipped pages
+  // for the 12-slot critique budget — small boosts left /spend and /traces at 0.
+  if (!isKitSpecimenPath(page.url) && findingCount < 3) {
+    if (isProductListPath(page.url)) {
+      score += controls >= 4 ? 220 : 140
+    } else if (findingCount === 0 && controls >= 12) {
+      // Quiet detail with real chrome (e.g. /agents/agt-0006) still deserves a look.
+      score += 110
+    } else if (controls >= 4) {
+      score += 35
     }
-  } catch {
-    /* ignore */
   }
   return score
+}
+
+/**
+ * Pick pages for the AI critique budget.
+ * Soft-404 / broken pages still rank high, but at least `listSeats` quiet
+ * product-list surfaces are reserved so /spend and /traces cannot be starved.
+ */
+export function pickCritiqueTargets(
+  pages: CapturedPage[],
+  findingCountFor: (page: CapturedPage) => number,
+  budget = 12,
+  listSeats = 3
+): CapturedPage[] {
+  if (pages.length <= budget) return [...pages]
+  const ranked = [...pages].sort(
+    (a, b) => critiquePriorityScore(b, findingCountFor(b)) - critiquePriorityScore(a, findingCountFor(a))
+  )
+  const picked: CapturedPage[] = []
+  const used = new Set<string>()
+
+  const seats = Math.min(listSeats, budget)
+  for (const p of ranked) {
+    if (picked.length >= seats) break
+    if (!isProductListPath(p.url)) continue
+    if (findingCountFor(p) >= 8) continue // already loud — don't burn a reserved seat
+    picked.push(p)
+    used.add(p.url)
+  }
+
+  for (const p of ranked) {
+    if (picked.length >= budget) break
+    if (used.has(p.url)) continue
+    picked.push(p)
+    used.add(p.url)
+  }
+  return picked
 }
 
 /** Score used to pick interaction-probe targets. */
 export function interactionProbeScore(page: CapturedPage): number {
   let score = brokenUiCritiqueBoost(page)
-  try {
-    const parts = new URL(page.url).pathname.split('/').filter(Boolean)
-    score += parts.length * 12
-    // Prefer real product lists over kit pages.
-    if (parts.length <= 1 && !isKitSpecimenPath(page.url)) score += 45
-  } catch {
-    /* ignore */
-  }
+  const parts = pathParts(page.url)
+  score += parts.length * 12
+  // Prefer real product lists over kit pages.
+  if (isProductListPath(page.url)) score += 55
   if (isKitSpecimenPath(page.url)) score -= 100
   const controls = page.controls?.length ?? 0
   score += Math.min(40, Math.floor(controls / 2))
