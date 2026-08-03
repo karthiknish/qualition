@@ -6,6 +6,8 @@ name: Auto release
 #
 # Branch protection blocks GITHUB_TOKEN from pushing commits to main, so we
 # push only the release tag and open a PR to sync package.json when bumped.
+# Packaging runs before the PR step so a PR permission hiccup cannot skip
+# the GitHub Release (that was how v0.1.28/v0.1.29 got tagged with no assets).
 #
 # Include [skip-release] in a commit message to skip.
 on:
@@ -82,8 +84,28 @@ jobs:
         if: steps.bump.outputs.skipped != 'true'
         run: git push origin "v${{ steps.bump.outputs.version }}"
 
+      - name: Compile main, preload and renderer
+        if: steps.bump.outputs.skipped != 'true'
+        run: npm run build
+
+      - name: Verify entry points exist before packaging
+        if: steps.bump.outputs.skipped != 'true'
+        run: |
+          test -f out/main/index.js || { echo "::error::out/main/index.js missing"; exit 1; }
+          test -f out/preload/index.mjs || { echo "::error::out/preload/index.mjs missing"; exit 1; }
+          test -f out/renderer/index.html || { echo "::error::out/renderer/index.html missing"; exit 1; }
+
+      - name: Package and publish to GitHub Releases
+        if: steps.bump.outputs.skipped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --mac --publish always
+
+      # After assets are published — never block the release on PR creation.
       - name: Open PR to sync version on main
         if: steps.bump.outputs.skipped != 'true' && steps.bump.outputs.bumped == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -108,24 +130,6 @@ jobs:
           )"
           fi
 
-      - name: Compile main, preload and renderer
-        if: steps.bump.outputs.skipped != 'true'
-        run: npm run build
-
-      - name: Verify entry points exist before packaging
-        if: steps.bump.outputs.skipped != 'true'
-        run: |
-          test -f out/main/index.js || { echo "::error::out/main/index.js missing"; exit 1; }
-          test -f out/preload/index.mjs || { echo "::error::out/preload/index.mjs missing"; exit 1; }
-          test -f out/renderer/index.html || { echo "::error::out/renderer/index.html missing"; exit 1; }
-
-      - name: Package and publish to GitHub Releases
-        if: steps.bump.outputs.skipped != 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-        run: npx electron-builder --mac --publish always
-
       - name: Summarise
         if: steps.bump.outputs.skipped != 'true'
         run: |
@@ -133,7 +137,7 @@ jobs:
             echo "### Auto-released v${{ steps.bump.outputs.version }}"
             echo ""
             if [ "${{ steps.bump.outputs.bumped }}" = "true" ]; then
-              echo "Opened a PR to sync \`package.json\` on main (branch protection blocks direct pushes)."
+              echo "Opened (or attempted) a PR to sync \`package.json\` on main."
               echo ""
             fi
             ls -lh release/*.dmg release/*.zip 2>/dev/null | awk '{print "- " $9 " (" $5 ")"}' || true
