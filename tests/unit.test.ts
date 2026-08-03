@@ -14,7 +14,7 @@ import { loginUrlGuesses, passwordCandidates, redactAuth, usernameCandidates } f
 import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services/runner.js'
 import { deleteCredential, listCredentials, originOf, resolveCredential, saveCredential } from '../src/main/services/vault.js'
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
-import { flowInventory, heuristicFlows, validateFlow } from '../src/main/services/flows.js'
+import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow } from '../src/main/services/flows.js'
 import { isDeeperRoute, sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
@@ -1071,6 +1071,130 @@ test('derived flows click through each page rather than only opening URLs', () =
   assert.equal(validateFlow(first, pages).invalid, undefined)
 })
 
+test('detailRecordFlows opens list then nested ID routes', () => {
+  const list = page({
+    url: 'https://tool.internal/tasks',
+    title: 'Tasks',
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'Tasks',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1440, height: 800 },
+        textPreview: 'Your tasks',
+        headings: ['Tasks'],
+        ctaLabels: ['New task'],
+        components: [],
+        stats: {
+          interactiveCount: 2,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 2,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  const detail = page({
+    url: 'https://tool.internal/tasks/mn71ejkaq6rbhb9b7fj6hkrnmn8bkm2q',
+    title: 'Task detail',
+    controls: [
+      {
+        tag: 'button',
+        type: '',
+        role: 'button',
+        text: 'Claim',
+        placeholder: '',
+        label: '',
+        ariaLabel: '',
+        name: '',
+        href: '',
+        testId: ''
+      }
+    ],
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'Detail',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1440, height: 800 },
+        textPreview: 'Task body',
+        headings: ['Intake review'],
+        ctaLabels: ['Claim'],
+        components: [],
+        stats: {
+          interactiveCount: 1,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 2,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  const deep = detailRecordFlows([list, detail])
+  assert.ok(deep.length >= 1, 'expected a list→detail flow')
+  const flow = deep[0]
+  assert.match(flow.name, /detail records/i)
+  const gotos = flow.steps.filter((s) => s.action === 'goto').map((s) => s.target)
+  assert.ok(gotos.includes('/tasks'))
+  assert.ok(gotos.some((t) => (t ?? '').includes('/tasks/mn71')))
+  assert.ok(flow.steps.some((s) => s.action === 'click' && s.target === 'text=Claim'))
+  assert.equal(validateFlow(flow, [list, detail]).invalid, undefined)
+
+  const withHeuristic = heuristicFlows([list, detail])
+  assert.ok(
+    withHeuristic.some((f) => /detail records/i.test(f.name)),
+    'heuristicFlows must include detail journeys'
+  )
+})
+
+test('validateFlow rejects vague assertText body', () => {
+  const p = page({
+    url: 'https://tool.internal/',
+    sections: [
+      {
+        id: 's1',
+        role: 'hero',
+        roleConfidence: 1,
+        label: 'Home',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1440, height: 600 },
+        textPreview: 'Welcome',
+        headings: ['Welcome'],
+        ctaLabels: [],
+        components: [],
+        stats: {
+          interactiveCount: 0,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 1,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  const bad = validateFlow(
+    {
+      name: 'weak',
+      steps: [
+        { action: 'goto', target: '/' },
+        { action: 'assertText', value: 'body' }
+      ]
+    },
+    [p]
+  )
+  assert.ok(bad.invalid, 'assertText body must be rejected')
+  assert.match(bad.invalid!, /vague|body/i)
+})
+
 test('flow count scales with the size of the crawl instead of a fixed handful', () => {
   const many = Array.from({ length: 10 }, (_, i) =>
     page({
@@ -1264,50 +1388,120 @@ test('registry search ranks exact names first and builds valid add commands', ()
   assert.equal(addCommand(items[2] as never), 'npx shadcn@latest add @acme/login-01')
 })
 
-test('queriesForSection prefers product UI vocabulary over generic section/card', async () => {
+test('queriesForSection prefers component vocabulary over full-page shells', async () => {
   const { queriesForSection } = await import('../src/main/services/shoogle.js')
   const q = queriesForSection(
     'content',
     { label: 'Settings', headings: ['Personal', 'Workspace'], textPreview: 'Account settings sidebar' },
-    ['The section has no visible page hierarchy']
+    ['The section has no visible page hierarchy'],
+    ['empty state', 'command menu']
   )
-  assert.ok(q.some((x) => /settings/i.test(x)), `expected settings query, got ${q.join(', ')}`)
-  assert.ok(!q.includes('section') || q[0] !== 'section')
-  assert.ok(q.some((x) => /dashboard|empty|settings|chat|kanban|feed/i.test(x)))
+  assert.ok(q.some((x) => /empty state|command menu/i.test(x)), `expected gap queries, got ${q.join(', ')}`)
+  assert.ok(!q.some((x) => /^dashboard$/i.test(x)), `should not query whole dashboards: ${q.join(', ')}`)
+  assert.ok(q.some((x) => /settings|empty|command|tabs|sheet|skeleton|toast/i.test(x)))
 })
 
-test('formatRecommendations prefers shoogle community blocks and labels origin', () => {
+test('gapsFromMobbin surfaces unique missing components', async () => {
+  const { gapsFromMobbin, isFullPageShell, isDetailPath } = await import('../src/main/services/componentGaps.js')
+  assert.equal(isFullPageShell('dashboard-01', 'registry:block', 'App shell with KPI cards'), true)
+  assert.equal(isFullPageShell('dashboard-8', 'registry:block', 'Creator finance desk to clear royalties'), true)
+  assert.equal(isFullPageShell('empty', 'registry:ui', 'Empty state'), false)
+  assert.equal(isFullPageShell('sidebar', 'registry:ui', 'Collapsible navigation sidebar panel'), false)
+  assert.equal(isFullPageShell('sidebar-01', 'registry:block', 'App sidebar shell'), true)
+  assert.equal(isDetailPath('/tasks/mn71ejkaq6rbhb9b7fj6hkrnmn8bkm2q'), true)
+  assert.equal(isDetailPath('/agents/agt-0007'), true)
+  assert.equal(isDetailPath('/settings'), false)
+  const gaps = gapsFromMobbin(
+    [
+      {
+        query: 'saas overview',
+        kind: 'screen',
+        title: 'Overview with empty state and command palette',
+        description: 'KPI cards, empty state when no projects, Cmd+K command menu, toast on save'
+      }
+    ],
+    {
+      id: 's1',
+      role: 'content',
+      roleConfidence: 0.5,
+      label: 'Overview',
+      selector: 'main',
+      rect: { x: 0, y: 0, width: 1200, height: 800 },
+      textPreview: 'Welcome back',
+      headings: ['Overview'],
+      ctaLabels: ['New project'],
+      components: [{ tag: 'button', role: 'button', text: 'New project', count: 1 }],
+      stats: {
+        interactiveCount: 2,
+        imageCount: 0,
+        textDensity: 1,
+        distinctBgColors: 1,
+        distinctFontSizes: 2,
+        maxTextWidthPx: 600
+      }
+    }
+  )
+  assert.ok(gaps.some((g) => g.id === 'empty-state'))
+  assert.ok(gaps.some((g) => g.id === 'command-menu'))
+  assert.ok(gaps.some((g) => g.id === 'toast'))
+})
+
+test('formatRecommendations prefers unique components over dashboard shells', () => {
   const text = buildFixPrompt({
     id: 't2',
     createdAt: Date.now(),
     status: 'done',
     config,
-    pages: [page()],
+    pages: [
+      page(),
+      {
+        ...page(),
+        url: 'http://localhost:5181/tasks/mn71ejkaq6rbhb9b7fj6hkrnmn8bkm2q',
+        viewport: 'desktop'
+      }
+    ],
     findings: [],
     flows: [],
     references: [],
     recommendations: [
       {
         sectionId: 's1',
+        pageUrl: 'http://localhost:5181/',
         sectionRole: 'content',
-        reason: 'Needs a real dashboard block.',
+        reason: 'Mobbin uses empty state — missing here.',
         source: 'mixed',
         items: [
           {
             name: 'dashboard-01',
             registry: '@shadcnblocks',
             type: 'registry:block',
-            description: 'Community dashboard',
+            description: 'Community dashboard app shell',
             addCommand: 'npx shadcn@latest add @shadcnblocks/dashboard-01',
             source: 'shoogle'
           },
           {
-            name: 'card',
+            name: 'dashboard-8',
+            registry: '@reui',
+            type: 'registry:block',
+            description: 'Creator finance desk to clear royalties: claimable balance and payout lanes',
+            addCommand: 'npx shadcn@latest add @reui/dashboard-8',
+            source: 'shoogle'
+          },
+          {
+            name: 'empty',
             registry: '@shadcn',
             type: 'registry:ui',
-            description: 'Card',
-            addCommand: 'npx shadcn@latest add card',
+            description: 'Empty state',
+            addCommand: 'npx shadcn@latest add empty',
             source: 'shadcn'
+          },
+          {
+            name: 'command',
+            registry: '@cult-ui',
+            type: 'registry:ui',
+            description: 'Command menu',
+            addCommand: 'npx shadcn@latest add @cult-ui/command',
+            source: 'shoogle'
           }
         ]
       }
@@ -1316,11 +1510,12 @@ test('formatRecommendations prefers shoogle community blocks and labels origin',
     interactions: [],
     log: []
   } as Run)
-  const dash = text.indexOf('@shadcnblocks/dashboard-01')
-  const card = text.indexOf('npx shadcn@latest add card')
-  assert.ok(dash >= 0, 'community block present')
-  assert.ok(card < 0 || dash < card, 'community block should appear before generic card')
-  assert.match(text, /community @shadcnblocks/)
+  assert.ok(text.includes('npx shadcn@latest add empty') || text.includes('@cult-ui/command'))
+  assert.equal(text.includes('@shadcnblocks/dashboard-01'), false, 'dashboard shells must be stripped')
+  assert.equal(text.includes('@reui/dashboard-8'), false, 'reui dashboard shells must be stripped')
+  assert.ok(text.includes('Detail/ID routes'), 'detail routes should be called out in context')
+  assert.ok(text.includes('do not install a dashboard block'), 'detail guidance for component swaps')
+  assert.ok(text.includes('· /'), 'recs should include pathname where applied')
 })
 
 /* ------------------------------ fix prompts ------------------------------ */

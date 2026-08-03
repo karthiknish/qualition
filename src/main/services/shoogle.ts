@@ -81,52 +81,54 @@ export async function searchShoogle(query: string, limit = 8, registries?: strin
 }
 
 /**
- * Section roles map to the vocabulary community registries actually use for
- * block names, which is what Shoogle full-text matches on.
+ * Section roles map to *component* vocabulary (not full page shells).
+ * Shoogle full-text matches these phrases against community registry names.
  */
 const ROLE_QUERIES: Record<SectionRole, string[]> = {
-  nav: ['sidebar navigation', 'navbar', 'app sidebar', 'settings nav'],
-  hero: ['hero', 'banner', 'landing hero'],
-  features: ['feature', 'bento', 'feature grid'],
-  pricing: ['pricing', 'pricing table', 'plan cards'],
-  testimonials: ['testimonial', 'review', 'social proof'],
-  logos: ['logo cloud', 'logos', 'marquee'],
-  faq: ['faq', 'accordion faq'],
-  cta: ['cta', 'call to action'],
-  form: ['login form', 'signup', 'settings form', 'contact form'],
-  table: ['data table', 'tanstack table', 'orders table'],
-  gallery: ['gallery', 'carousel', 'template gallery', 'card grid'],
-  stats: ['stats', 'kpi cards', 'dashboard metrics', 'chart'],
-  footer: ['footer'],
-  // "content" is the catch-all for app shells — query product UI, not "section/card".
-  content: ['dashboard', 'empty state', 'settings page', 'chat', 'kanban', 'activity feed']
+  nav: ['navigation menu', 'breadcrumb', 'menubar', 'dropdown menu'],
+  hero: ['button', 'badge', 'aspect ratio'],
+  features: ['card', 'hover card', 'badge', 'separator'],
+  pricing: ['toggle group', 'badge', 'tooltip', 'card'],
+  testimonials: ['avatar', 'carousel', 'card'],
+  logos: ['carousel', 'marquee logos', 'aspect ratio'],
+  faq: ['accordion', 'collapsible'],
+  cta: ['button', 'input group', 'badge'],
+  form: ['form field', 'input', 'select', 'checkbox', 'input otp', 'sonner'],
+  table: ['data table', 'pagination', 'dropdown menu', 'skeleton', 'empty state'],
+  gallery: ['carousel', 'dialog', 'scroll area', 'aspect ratio'],
+  stats: ['chart', 'progress', 'badge', 'card'],
+  footer: ['separator', 'navigation menu', 'button'],
+  // Catch-all app chrome — unique widgets, never whole dashboards.
+  content: ['empty state', 'command menu', 'tabs', 'sheet', 'skeleton', 'toast']
 }
 
-/** Extra search phrases pulled from section copy + finding titles. */
+/** Extra search phrases pulled from section copy, findings, and Mobbin gaps. */
 export function queriesForSection(
   role: SectionRole,
   section: { label?: string; headings?: string[]; ctaLabels?: string[]; textPreview?: string },
-  problems: string[] = []
+  problems: string[] = [],
+  mobbinGapQueries: string[] = []
 ): string[] {
-  const out: string[] = [...(ROLE_QUERIES[role] ?? [role])]
+  const out: string[] = [...mobbinGapQueries, ...(ROLE_QUERIES[role] ?? [role])]
   const blob = [section.label, ...(section.headings ?? []), ...(section.ctaLabels ?? []), section.textPreview ?? '', ...problems]
     .join(' ')
     .toLowerCase()
 
   const hints: [RegExp, string][] = [
-    [/\bsettings?\b/, 'settings page'],
-    [/\bsidebar\b|\bnavigation\b/, 'app sidebar'],
-    [/\bchat\b|\bcomposer\b|\binbox\b|\bmessage\b/, 'chat interface'],
-    [/\btask\b|\bkanban\b|\bboard\b|\bcolumn\b/, 'kanban board'],
-    [/\btemplate\b|\bstarter\b/, 'template gallery'],
-    [/\bdashboard\b|\boverview\b|\bkpi\b/, 'dashboard'],
-    [/\bchart\b|\bmetrics?\b|\bspark\b/, 'chart stats'],
+    [/\bsettings?\b/, 'settings form field'],
+    [/\bsidebar\b|\bnavigation\b/, 'navigation menu'],
+    [/\bchat\b|\bcomposer\b|\binbox\b|\bmessage\b/, 'chat composer input'],
+    [/\btask\b|\bkanban\b|\bboard\b|\bcolumn\b/, 'kanban card'],
     [/\bempty\b|\bno (results|data|items)\b/, 'empty state'],
-    [/\bpricing\b|\bplan\b/, 'pricing'],
-    [/\blogin\b|\bsign[- ]?in\b|\bauth\b/, 'login form'],
+    [/\bchart\b|\bmetrics?\b|\bspark\b/, 'chart'],
+    [/\bpricing\b|\bplan\b/, 'pricing card'],
+    [/\blogin\b|\bsign[- ]?in\b|\bauth\b/, 'login form field'],
     [/\btable\b|\bgrid\b/, 'data table'],
     [/\bmodal\b|\bdialog\b|\bsheet\b|\boverlay\b/, 'dialog sheet'],
-    [/\bcommand\b|\bpalette\b|\bsearch\b/, 'command menu']
+    [/\bcommand\b|\bpalette\b|\bcmd\+?k\b/, 'command menu'],
+    [/\btoast\b|\bnotification\b/, 'toast'],
+    [/\bskeleton\b|\bloading\b/, 'skeleton'],
+    [/\bfilter\b/, 'filter dropdown']
   ]
   for (const [re, q] of hints) {
     if (re.test(blob)) out.push(q)
@@ -136,16 +138,17 @@ export function queriesForSection(
   const label = (section.label ?? '').trim()
   if (label.length >= 4 && label.length <= 48 && !/^s\d+$/i.test(label)) out.push(label)
 
-  // Dedupe, keep order, cap.
+  // Dedupe, keep order, drop whole-page shell queries.
   const seen = new Set<string>()
   const unique: string[] = []
   for (const q of out) {
     const k = q.toLowerCase()
     if (seen.has(k)) continue
+    if (/^(dashboard|admin dashboard|settings page|kanban board|template gallery)$/i.test(k)) continue
     seen.add(k)
     unique.push(q)
   }
-  return unique.slice(0, 6)
+  return unique.slice(0, 8)
 }
 
 /** Best-effort block candidates for a section, deduplicated. */
@@ -158,9 +161,10 @@ export async function shoogleForSection(
   role: SectionRole,
   section: { label?: string; headings?: string[]; ctaLabels?: string[]; textPreview?: string },
   problems: string[] = [],
-  limit = 6
+  limit = 6,
+  mobbinGapQueries: string[] = []
 ): Promise<ShoogleItem[]> {
-  const queries = queriesForSection(role, section, problems)
+  const queries = queriesForSection(role, section, problems, mobbinGapQueries)
   const items = await shoogleForQueries(queries, Math.max(3, Math.ceil(limit / 2)))
   return items.slice(0, limit)
 }

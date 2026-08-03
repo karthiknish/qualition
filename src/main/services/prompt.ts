@@ -8,6 +8,7 @@
  */
 import type { ComponentRecommendation, Finding, Run, Severity } from '../../shared/types.js'
 import { sortFindingsForBrief } from './audit.js'
+import { isDetailPath, isFullPageShell } from './componentGaps.js'
 
 const SEVERITY_ORDER: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
 
@@ -289,7 +290,7 @@ function focusConflictNote(findings: Finding[]): string | null {
   return null
 }
 
-/** Dedupe recommendations; prefer community (Shoogle) blocks over generic shadcn. */
+/** Dedupe recommendations; prefer unique Mobbin-gap components over page shells. */
 export function formatRecommendations(
   recs: ComponentRecommendation[],
   findings: Finding[]
@@ -302,35 +303,49 @@ export function formatRecommendations(
     .map((f) => `${f.title} ${f.fix}`.toLowerCase())
     .join(' ')
 
-  const scoreItem = (item: { name: string; source?: string; registry?: string }): number => {
+  const scoreItem = (item: {
+    name: string
+    source?: string
+    registry?: string
+    type?: string
+    description?: string
+  }): number => {
     const n = item.name.toLowerCase()
     let s = 0
     if (item.source === 'shoogle') s += 12
     if (item.registry && item.registry !== '@shadcn') s += 4
-    if (/button|label|input|form|field|checkbox|dialog|sheet|dropdown|navigation|focus|alert/.test(n) && themeHints.match(new RegExp(n.split('-')[0] || n, 'i'))) {
+    if (item.type === 'registry:ui') s += 6
+    if (/button|label|input|form|field|checkbox|dialog|sheet|dropdown|navigation|focus|alert|empty|command|skeleton|toast|table|pagination/.test(n) && themeHints.match(new RegExp(n.split('-')[0] || n, 'i'))) {
       s += 3
     }
-    if (/button|label|dialog|sheet|checkbox|form|field/.test(n) && /button|label|focus|overlay|form|checkbox|aria/i.test(themeHints)) {
+    if (/button|label|dialog|sheet|checkbox|form|field|empty|command/.test(n) && /button|label|focus|overlay|form|checkbox|aria|empty|command/i.test(themeHints)) {
       s += 2
     }
     if (GENERIC_CONTENT_COMPONENTS.has(n)) s -= 4
     return s
   }
 
+  const usable = recs
+    .map((r) => ({
+      ...r,
+      items: r.items.filter((i) => !isFullPageShell(i.name, i.type, i.description))
+    }))
+    .filter((r) => r.items.length > 0)
+
   // Group by role, but collapse duplicate content sections
   const byRole = new Map<string, ComponentRecommendation[]>()
-  for (const r of recs) {
+  for (const r of usable) {
     const key = r.sectionRole
     const list = byRole.get(key) ?? []
     list.push(r)
     byRole.set(key, list)
   }
 
-  const shoogleOnly = recs.every((r) => r.source === 'shadcn')
-  if (shoogleOnly && recs.length) {
+  const shoogleOnly = usable.length > 0 && usable.every((r) => r.source === 'shadcn')
+  if (shoogleOnly) {
     out.push('')
     out.push(
-      '_Note: these suggestions are first-party shadcn primitives — Shoogle community registries returned nothing (or were unreachable) for this run. Re-check the Shoogle status pill and re-run with “shadcn replacements” enabled._'
+      '_Note: these suggestions are first-party shadcn primitives — Shoogle community registries returned nothing (or were unreachable) for this run. Re-check the Shoogle status pill and re-run with “Component replacements” enabled._'
     )
   }
 
@@ -365,10 +380,19 @@ export function formatRecommendations(
       genericPackEmitted = true
     }
 
+    const paths = [
+      ...new Set(group.map((g) => (g.pageUrl ? pathnameOf(g.pageUrl) : '')).filter(Boolean))
+    ].slice(0, 4)
     const sectionIds = [...new Set(group.map((g) => g.sectionId))].slice(0, 4).join(', ')
     const sources = [...new Set(group.map((g) => g.source))]
+    const where =
+      paths.length > 0
+        ? ` · ${paths.join(', ')}`
+        : group.length > 1
+          ? ` (sections ${sectionIds})`
+          : ` (${primary.sectionId})`
     out.push('')
-    out.push(`### ${role}${group.length > 1 ? ` (sections ${sectionIds})` : ` (${primary.sectionId})`} · ${sources.join('+')}`)
+    out.push(`### ${role}${where} · ${sources.join('+')}`)
     out.push(primary.reason.split(';').slice(0, 2).join(';').trim())
     for (const i of unique) {
       const origin = i.source === 'shoogle' ? `community ${i.registry}` : 'shadcn first-party'
@@ -406,7 +430,18 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
 
   out.push('## Context')
   out.push(`- Target: ${run.config.targetUrl}`)
-  out.push(`- Pages audited: ${run.pages.map((p) => pathnameOf(p.url)).join(', ') || 'n/a'}`)
+  const paths = [...new Set(run.pages.map((p) => pathnameOf(p.url)))]
+  const detailPaths = paths.filter((p) => isDetailPath(p))
+  const indexPaths = paths.filter((p) => !isDetailPath(p))
+  out.push(`- Pages audited: ${paths.join(', ') || 'n/a'}`)
+  if (detailPaths.length) {
+    out.push(
+      `- Index/list routes (${indexPaths.length}): ${indexPaths.slice(0, 24).join(', ')}${indexPaths.length > 24 ? ', …' : ''}`
+    )
+    out.push(
+      `- Detail/ID routes (${detailPaths.length}): ${detailPaths.slice(0, 12).join(', ')}${detailPaths.length > 12 ? ', …' : ''} — treat these as record views (header, metadata, actions, related lists), not new dashboards`
+    )
+  }
   if (run.scorecard) {
     out.push(`- Overall grade: ${run.scorecard.grade} (${run.scorecard.overall}/100)`)
     out.push(
@@ -466,14 +501,25 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
   }
 
   /* --------------------------- component swaps --------------------------- */
-  const recs =
-    scope === 'section' && opts.sectionId
-      ? run.recommendations.filter((r) => r.sectionId === opts.sectionId)
-      : run.recommendations
+  let recs = run.recommendations
+  if (scope === 'section' && opts.sectionId) {
+    recs = recs.filter((r) => r.sectionId === opts.sectionId)
+  }
+  if (opts.pageUrl) {
+    const want = pathnameOf(opts.pageUrl)
+    recs = recs.filter((r) => !r.pageUrl || pathnameOf(r.pageUrl) === want)
+  }
   if (recs.length) {
     out.push('')
     out.push('## Suggested component replacements')
-    out.push('These are real registry components. Prefer community blocks (Shoogle) over first-party shadcn primitives when both appear. Duplicates across similar sections are listed once.')
+    out.push(
+      'Unique missing widgets inferred from Mobbin references (and Shoogle/shadcn registries). Prefer small composable components over full-page shells. Duplicates across similar sections are listed once; pathnames show where each role applied.'
+    )
+    if (detailPaths.length) {
+      out.push(
+        'On detail/ID routes, reach for header, breadcrumb, description-list, sheet/dialog, and action-menu primitives — do not install a dashboard block.'
+      )
+    }
     out.push(...formatRecommendations(recs, findings))
   }
 

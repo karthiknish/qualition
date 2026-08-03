@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CapturedPage, Finding, Run, RunProgress, Severity } from '../../../shared/types'
+import type { CapturedPage, Finding, FlowResult, Run, RunProgress, Severity } from '../../../shared/types'
 import { api, CATEGORY_LABEL, cx, formatDuration, gradeColor, SEVERITY_COLOR } from '../lib/api'
 import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
 
@@ -615,97 +615,278 @@ function Sections({ run, page }: { run: Run; page: CapturedPage }): JSX.Element 
   )
 }
 
+function flowStatus(f: FlowResult): 'pass' | 'fail' | 'skipped' {
+  if (f.invalid) return 'skipped'
+  return f.ok ? 'pass' : 'fail'
+}
+
+function flowDepth(f: FlowResult): 'deep' | 'shallow' {
+  const gotos = f.steps.filter((s) => s.step.action === 'goto')
+  const nested = gotos.some((s) => ((s.step.target ?? '').split('/').filter(Boolean).length >= 2))
+  const interactions = f.steps.filter((s) => s.step.action === 'click' || s.step.action === 'fill').length
+  return nested || interactions >= 3 ? 'deep' : 'shallow'
+}
+
+function stepLabel(s: FlowResult['steps'][number]): string {
+  if (s.step.intent) return s.step.intent
+  const bits = [s.step.action, s.step.target, s.step.value].filter(Boolean)
+  return bits.join(' ')
+}
+
+function stepTone(s: FlowResult['steps'][number]): string {
+  if (s.outcome === 'refused') return 'border-amber-500/40 bg-amber-500/10 text-amber-200'
+  if (s.ok) return 'border-emerald-500/35 bg-emerald-500/10 text-emerald-200'
+  if (s.skipped) return 'border-zinc-700 bg-zinc-900 text-zinc-500'
+  return 'border-red-500/45 bg-red-500/15 text-red-200'
+}
+
 function Flows({ run }: { run: Run }): JSX.Element {
+  const [filter, setFilter] = useState<'all' | 'fail' | 'pass' | 'skipped'>('all')
+  const [open, setOpen] = useState<string | null>(null)
+
   if (run.flows.length === 0) return <Empty>No flows were replayed.</Empty>
+
+  const brokenFindings = run.findings.filter(
+    (f) => f.category === 'flow' && /^flow-\d+$/.test(f.id)
+  )
+  const counts = {
+    pass: run.flows.filter((f) => flowStatus(f) === 'pass').length,
+    fail: run.flows.filter((f) => flowStatus(f) === 'fail').length,
+    skipped: run.flows.filter((f) => flowStatus(f) === 'skipped').length,
+    deep: run.flows.filter((f) => flowDepth(f) === 'deep').length
+  }
+  const filtered = run.flows.filter((f) => (filter === 'all' ? true : flowStatus(f) === filter))
+  const active = open ?? filtered.find((f) => flowStatus(f) === 'fail')?.name ?? filtered[0]?.name ?? null
+
   return (
     <div className="space-y-3">
-      {run.flows.map((f) => (
-        <Panel
-          key={f.name}
-          title={
-            <span className="flex items-center gap-2">
-              <span>{f.name}</span>
-              <Badge className="border-zinc-700 bg-zinc-800 text-zinc-400">{f.origin ?? 'user'}</Badge>
-            </span>
-          }
-          right={
-            <Badge
-              className={
-                f.invalid
-                  ? 'border-zinc-600 bg-zinc-800 text-zinc-400'
-                  : f.ok
-                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                    : 'border-red-500/30 bg-red-500/10 text-red-300'
-              }
-            >
-              {f.invalid ? 'not run' : f.ok ? 'pass' : 'fail'} · {f.totalMs}ms
-            </Badge>
-          }
-        >
-          {f.invalid && (
-            <p className="mb-2 rounded-md border border-zinc-800 bg-zinc-950/60 p-2 text-[11px] leading-snug text-zinc-400">
-              Skipped before running: {f.invalid}. This is a bad test, not a product defect — so it was not counted
-              against the score.
-            </p>
-          )}
-          {f.startingState && (
-            <p className="mb-2 text-[11px] text-zinc-500">
-              Starting state:{' '}
-              {f.startingState.signedInAs ? `signed in as ${f.startingState.signedInAs}` : 'anonymous'}
-              {f.startingState.seededDataNote ? ` · ${f.startingState.seededDataNote}` : ''}
-            </p>
-          )}
-          <ol className="space-y-2">
-            {f.steps.map((s, i) => (
-              <li key={i} className="flex items-start gap-3">
-                <span
-                  className={cx(
-                    'mt-1 h-2 w-2 shrink-0 rounded-full',
-                    s.outcome === 'refused'
-                      ? 'bg-amber-400'
-                      : s.ok
-                        ? 'bg-emerald-400'
-                        : s.skipped
-                          ? 'bg-zinc-600'
-                          : 'bg-red-400'
-                  )}
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="text-[12px] text-zinc-200">
-                    {s.step.intent ?? (
-                      <span className="font-mono text-zinc-300">
-                        {s.step.action} {s.step.target ?? ''} {s.step.value ? `| ${s.step.value}` : ''}
-                      </span>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Passed" value={String(counts.pass)} />
+        <Stat label="Broken" value={String(counts.fail)} bad={counts.fail > 0} sub={counts.fail ? 'called out below' : undefined} />
+        <Stat label="Not run" value={String(counts.skipped)} />
+        <Stat label="Deep journeys" value={String(counts.deep)} sub="list→detail or 3+ interactions" />
+      </div>
+
+      {counts.fail > 0 && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-red-100/90">
+          <div className="font-medium text-red-200">
+            {counts.fail} journey{counts.fail === 1 ? '' : 's'} broke mid-flight
+          </div>
+          <ul className="mt-1.5 space-y-1 text-[11px] text-red-100/75">
+            {run.flows
+              .filter((f) => flowStatus(f) === 'fail')
+              .map((f) => {
+                const failedAt = f.steps.findIndex((s) => !s.ok && s.outcome !== 'refused')
+                const failed = failedAt >= 0 ? f.steps[failedAt] : undefined
+                const finding = brokenFindings.find((x) => x.title.includes(`"${f.name}"`))
+                return (
+                  <li key={f.name}>
+                    <button
+                      type="button"
+                      className="text-left hover:text-red-50"
+                      onClick={() => setOpen(f.name)}
+                    >
+                      <span className="text-red-200">{f.name}</span>
+                      {failed && (
+                        <span>
+                          {' '}
+                          · stopped at step {failedAt + 1}: {stepLabel(failed)}
+                          {failed.error ? ` — ${failed.error.slice(0, 90)}` : ''}
+                        </span>
+                      )}
+                      {finding && <span className="text-red-300/70"> · finding {finding.id}</span>}
+                    </button>
+                  </li>
+                )
+              })}
+          </ul>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-1.5">
+        {(
+          [
+            ['all', `all (${run.flows.length})`],
+            ['fail', `broken (${counts.fail})`],
+            ['pass', `passed (${counts.pass})`],
+            ['skipped', `not run (${counts.skipped})`]
+          ] as const
+        ).map(([id, label]) => (
+          <Chip key={id} active={filter === id} onClick={() => setFilter(id)}>
+            {label}
+          </Chip>
+        ))}
+      </div>
+
+      {filtered.map((f) => {
+        const status = flowStatus(f)
+        const depth = flowDepth(f)
+        const expanded = active === f.name
+        const failedAt = f.steps.findIndex((s) => !s.ok && !s.skipped && s.outcome !== 'refused')
+        return (
+          <Panel
+            key={f.name}
+            title={
+              <span className="flex flex-wrap items-center gap-2">
+                <button type="button" className="text-left text-zinc-100 hover:text-white" onClick={() => setOpen(expanded ? null : f.name)}>
+                  {f.name}
+                </button>
+                <Badge className="border-zinc-700 bg-zinc-800 text-zinc-400">{f.origin ?? 'user'}</Badge>
+                <Badge
+                  className={
+                    depth === 'deep'
+                      ? 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+                      : 'border-zinc-700 bg-zinc-900 text-zinc-500'
+                  }
+                >
+                  {depth}
+                </Badge>
+              </span>
+            }
+            right={
+              <Badge
+                className={
+                  status === 'skipped'
+                    ? 'border-zinc-600 bg-zinc-800 text-zinc-400'
+                    : status === 'pass'
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                      : 'border-red-500/30 bg-red-500/10 text-red-300'
+                }
+              >
+                {status === 'skipped' ? 'not run' : status === 'pass' ? 'pass' : 'broke'} · {f.totalMs}ms ·{' '}
+                {f.steps.length} steps
+              </Badge>
+            }
+          >
+            {f.invalid && (
+              <p className="mb-3 rounded-md border border-zinc-800 bg-zinc-950/60 p-2 text-[11px] leading-snug text-zinc-400">
+                Skipped before running: {f.invalid}. Bad test, not a product defect — not scored against the product.
+              </p>
+            )}
+            {f.startingState && (
+              <p className="mb-3 text-[11px] text-zinc-500">
+                Starting state:{' '}
+                {f.startingState.signedInAs ? `signed in as ${f.startingState.signedInAs}` : 'anonymous'}
+                {f.startingState.seededDataNote ? ` · ${f.startingState.seededDataNote}` : ''}
+              </p>
+            )}
+
+            {/* Progress rail with arrows */}
+            <div className="mb-3 flex items-stretch gap-0 overflow-x-auto pb-1">
+              {f.steps.map((s, i) => {
+                const broke = failedAt === i
+                const afterBreak = failedAt >= 0 && i > failedAt
+                return (
+                  <div key={i} className="flex items-center">
+                    <div
+                      className={cx(
+                        'min-w-[7.5rem] max-w-[11rem] rounded-lg border px-2.5 py-2',
+                        afterBreak ? 'border-zinc-800/80 bg-zinc-950/40 opacity-40' : stepTone(s),
+                        broke && 'ring-1 ring-red-400/50'
+                      )}
+                      title={s.error || stepLabel(s)}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-mono text-[9px] uppercase tracking-wider opacity-70">
+                          {i + 1}. {s.step.action}
+                        </span>
+                        <span className="text-[9px] opacity-60">{s.ms}ms</span>
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-[11px] leading-snug">{stepLabel(s)}</div>
+                      {broke && <div className="mt-1 text-[9px] font-medium uppercase tracking-wide text-red-300">broke here</div>}
+                    </div>
+                    {i < f.steps.length - 1 && (
+                      <div
+                        className={cx(
+                          'mx-1 flex shrink-0 items-center text-[14px]',
+                          failedAt === i ? 'text-red-400' : failedAt >= 0 && i > failedAt ? 'text-zinc-700' : 'text-zinc-500'
+                        )}
+                        aria-hidden
+                      >
+                        →
+                      </div>
                     )}
-                    {s.outcome && (
-                      <Badge className="ml-2 border-zinc-700 bg-zinc-900 text-zinc-500">{s.outcome}</Badge>
-                    )}
-                    <span className="ml-2 text-[11px] text-zinc-600">{s.ms}ms</span>
                   </div>
-                  {s.step.intent && (
-                    <div className="font-mono text-[10px] text-zinc-600">
-                      {s.step.action} {s.step.target ?? ''}
-                    </div>
-                  )}
-                  {s.error && (
-                    <div className={cx('text-[11px]', s.outcome === 'refused' ? 'text-amber-400/90' : 'text-red-400')}>
-                      {s.error}
-                    </div>
-                  )}
-                  {s.domSnapshot && (
-                    <pre className="mt-1 max-h-20 overflow-auto rounded border border-zinc-800 bg-zinc-950/80 p-1.5 text-[9px] text-zinc-500">
-                      {s.domSnapshot}
-                    </pre>
-                  )}
-                </div>
-                {s.screenshot && (
-                  <img src={api.asset(s.screenshot)} alt="" className="h-16 w-28 rounded border border-zinc-800 object-cover object-top" />
+                )
+              })}
+            </div>
+
+            {failedAt >= 0 && f.steps[failedAt]?.error && (
+              <div className="mb-3 rounded-lg border border-red-500/25 bg-red-950/30 px-3 py-2 text-[11px] leading-relaxed text-red-100/85">
+                <span className="font-medium text-red-200">Break:</span> {f.steps[failedAt].error}
+                {f.steps[failedAt].outcome && (
+                  <span className="ml-2 text-red-300/70">outcome={f.steps[failedAt].outcome}</span>
                 )}
-              </li>
-            ))}
-          </ol>
-        </Panel>
-      ))}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setOpen(expanded ? null : f.name)}
+              className="text-[11px] text-zinc-500 hover:text-zinc-300"
+            >
+              {expanded ? 'Hide step details' : 'Show step details & screenshots'}
+            </button>
+
+            {expanded && (
+              <ol className="mt-3 space-y-2 border-t border-zinc-800/80 pt-3">
+                {f.steps.map((s, i) => (
+                  <li key={i} className="flex items-start gap-3">
+                    <span
+                      className={cx(
+                        'mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-medium',
+                        s.outcome === 'refused'
+                          ? 'bg-amber-500/20 text-amber-300'
+                          : s.ok
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : s.skipped
+                              ? 'bg-zinc-800 text-zinc-500'
+                              : 'bg-red-500/20 text-red-300'
+                      )}
+                    >
+                      {i + 1}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[12px] text-zinc-200">
+                        {stepLabel(s)}
+                        {s.outcome && (
+                          <Badge className="ml-2 border-zinc-700 bg-zinc-900 text-zinc-500">{s.outcome}</Badge>
+                        )}
+                        <span className="ml-2 text-[11px] text-zinc-600">{s.ms}ms</span>
+                      </div>
+                      {s.step.intent && (
+                        <div className="font-mono text-[10px] text-zinc-600">
+                          {s.step.action} {s.step.target ?? ''} {s.step.value ?? ''}
+                        </div>
+                      )}
+                      {s.error && (
+                        <div className={cx('text-[11px]', s.outcome === 'refused' ? 'text-amber-400/90' : 'text-red-400')}>
+                          {s.error}
+                        </div>
+                      )}
+                      {s.domSnapshot && (
+                        <pre className="mt-1 max-h-20 overflow-auto rounded border border-zinc-800 bg-zinc-950/80 p-1.5 text-[9px] text-zinc-500">
+                          {s.domSnapshot}
+                        </pre>
+                      )}
+                    </div>
+                    {s.screenshot && (
+                      <img
+                        src={api.asset(s.screenshot)}
+                        alt=""
+                        className={cx(
+                          'h-16 w-28 rounded border object-cover object-top',
+                          s.ok ? 'border-zinc-800' : 'border-red-500/40'
+                        )}
+                      />
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Panel>
+        )
+      })}
     </div>
   )
 }

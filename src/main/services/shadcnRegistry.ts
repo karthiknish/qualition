@@ -1,5 +1,9 @@
 /**
- * shadcn registry search + section-level replacement recommendations.
+ * shadcn registry search + section-level component recommendations.
+ *
+ * Prefers unique primitives Mobbin references show that the page is missing —
+ * not whole dashboard / app-shell blocks. Shoogle community registries are
+ * searched with those gap queries; first-party shadcn fills the rest.
  *
  * Talks to the public registry over HTTP (no npx spawn):
  *   - component index: https://ui.shadcn.com/r/index.json
@@ -7,7 +11,8 @@
  * Extra registries (registry.json / index.json shaped) can be added in Settings.
  */
 import { shoogleForSection, shoogleAddCommand } from './shoogle.js'
-import type { ComponentRecommendation, PageSection, SectionRole } from '../../shared/types.js'
+import { gapsFromMobbin, isFullPageShell } from './componentGaps.js'
+import type { ComponentRecommendation, MobbinReference, PageSection, SectionRole } from '../../shared/types.js'
 
 export interface RegistryItem {
   name: string
@@ -33,22 +38,11 @@ export const SHADCN: RegistryDef = {
 }
 
 /**
- * Blocks are not listed in index.json but are addressable by name. This curated
- * catalogue is what makes "replace this section with X" concrete.
+ * Small composable blocks only. Full-page shells (dashboard-01, products-01,
+ * sidebar-*) are deliberately omitted — Mobbin gaps drive unique components.
  */
 const BLOCKS: { name: string; description: string; roles: SectionRole[] }[] = [
-  { name: 'login-01', description: 'Centered email/password login card', roles: ['form'] },
-  { name: 'login-02', description: 'Two-column login with cover image', roles: ['form'] },
-  { name: 'login-03', description: 'Login card with social providers', roles: ['form'] },
-  { name: 'login-04', description: 'Split login, form right, art left', roles: ['form'] },
-  { name: 'login-05', description: 'Minimal login with logo and muted footer', roles: ['form'] },
-  { name: 'signup-01', description: 'Signup card with name/email/password', roles: ['form'] },
-  { name: 'dashboard-01', description: 'App shell: sidebar, header, KPI cards, chart, data table', roles: ['stats', 'table', 'content'] },
-  { name: 'sidebar-07', description: 'Collapsible icon sidebar with nav groups', roles: ['nav'] },
-  { name: 'sidebar-08', description: 'Inset sidebar with secondary navigation', roles: ['nav'] },
-  { name: 'sidebar-13', description: 'Sidebar in a dialog for settings', roles: ['nav'] },
-  { name: 'products-01', description: 'Product list with filters, table and detail drawer', roles: ['table', 'gallery'] },
-  { name: 'calendar-11', description: 'Range calendar with presets', roles: ['content'] }
+  { name: 'calendar-11', description: 'Range calendar with presets', roles: ['content', 'form'] }
 ]
 
 /** Which primitives a given section role is normally built from. */
@@ -156,11 +150,13 @@ export function searchRegistry(items: RegistryItem[], query: string, limit = 8):
       if (it.keywords.includes(t)) score += 8
       else if (it.keywords.some((k) => k.startsWith(t))) score += 4
     }
-    if (it.type === 'registry:block') score += 2
+    if (it.type === 'registry:block') score -= 4
+    if (it.type === 'registry:ui') score += 6
+    if (isFullPageShell(it.name, it.type, it.description)) score -= 80
     return { it, score }
   })
   return scored
-    .filter((s) => s.score > 0)
+    .filter((s) => s.score > 0 && !isFullPageShell(s.it.name, s.it.type, s.it.description))
     .sort((a, b) => b.score - a.score)
     .slice(0, limit)
     .map((s) => s.it)
@@ -172,32 +168,36 @@ export function addCommand(item: RegistryItem): string {
 }
 
 /**
- * Recommend replacements for a section.
+ * Recommend unique components this section is missing vs Mobbin references.
  *
- * Shoogle (11k+ community blocks across every registry) is tried FIRST because
- * a whole pre-built block beats assembling card+badge+button by hand.
- * First-party shadcn fills a small primitive gap only when Shoogle returns
- * nothing useful, or to cover a11y primitives (button/label/dialog) once.
+ * Full-page dashboard / app-shell blocks are filtered out. Shoogle is searched
+ * with Mobbin-derived gap queries first; first-party shadcn fills primitives.
  */
 export async function recommendForSection(
   section: PageSection,
   problems: string[],
   extra: { name: string; url: string }[] = [],
-  useShoogle = true
+  useShoogle = true,
+  mobbinRefs: MobbinReference[] = [],
+  pageUrl?: string
 ): Promise<ComponentRecommendation> {
   const out: ComponentRecommendation['items'] = []
   let shoogleCount = 0
   let shoogleAttempted = false
 
+  const gaps = gapsFromMobbin(mobbinRefs, section)
+  const gapQueries = gaps.map((g) => g.query)
+
   if (useShoogle) {
     shoogleAttempted = true
     try {
-      for (const it of await shoogleForSection(section.role, section, problems, 6)) {
+      for (const it of await shoogleForSection(section.role, section, problems, 8, gapQueries)) {
+        if (isFullPageShell(it.name, it.type, it.description)) continue
         out.push({
           name: it.name,
           registry: it.registry,
           type: it.type,
-          description: it.description || `${it.registry} community block`,
+          description: it.description || `${it.registry} component`,
           addCommand: shoogleAddCommand(it),
           docs: it.homepage,
           source: 'shoogle'
@@ -210,26 +210,35 @@ export async function recommendForSection(
     }
   }
 
-  // When community blocks landed, only add 1–2 first-party primitives (not the
-  // whole ROLE_COMPONENTS dump). When Shoogle missed, fill more from shadcn.
-  const shadcnSlots = shoogleCount > 0 ? Math.min(2, 6 - out.length) : Math.min(5, 6 - out.length)
-  const fallback = await recommendFromShadcn(section, extra, shadcnSlots, shoogleCount > 0)
+  const shadcnSlots = Math.min(5, 6 - out.length)
+  const fallback = await recommendFromShadcn(section, extra, shadcnSlots, gaps)
   out.push(...fallback)
+
+  const gapNote =
+    gaps.length > 0
+      ? `Mobbin references use ${gaps
+          .slice(0, 4)
+          .map((g) => g.id)
+          .join(', ')} — missing here. `
+      : mobbinRefs.length > 0
+        ? 'Mobbin references for this section did not expose clear missing primitives; suggesting role-matched components. '
+        : ''
 
   const communityNote =
     shoogleCount > 0
-      ? 'Community registry blocks below are drop-in section replacements; first-party shadcn items are primitives only. '
+      ? 'Community registry hits below are unique widgets, not full page shells. '
       : shoogleAttempted
-        ? 'Shoogle returned no community blocks for this section — falling back to first-party shadcn primitives. '
+        ? 'Shoogle returned no component hits — falling back to first-party shadcn. '
         : ''
 
   const reason =
     problems.length > 0
-      ? `This ${section.role} section has: ${problems.slice(0, 3).join('; ')}. ${communityNote}Prefer a matching block over hand-rolling markup.`
-      : `${communityNote}Standardise this ${section.role} section on a registry block or primitive so spacing, radius, focus rings and tokens stay coherent.`
+      ? `This ${section.role} section has: ${problems.slice(0, 3).join('; ')}. ${gapNote}${communityNote}Add the missing primitives rather than swapping the whole layout.`
+      : `${gapNote}${communityNote}Standardise missing ${section.role} widgets on registry primitives so spacing, focus rings and tokens stay coherent.`
 
   return {
     sectionId: section.id,
+    pageUrl,
     sectionRole: section.role,
     reason: reason.trim(),
     source: shoogleCount > 0 && fallback.length > 0 ? 'mixed' : shoogleCount > 0 ? 'shoogle' : 'shadcn',
@@ -351,7 +360,7 @@ async function recommendFromShadcn(
   section: PageSection,
   extra: { name: string; url: string }[],
   limit: number,
-  primitivesOnly = false
+  gaps: { id: string; query: string; shadcn: string[] }[] = []
 ): Promise<ComponentRecommendation['items']> {
   if (limit <= 0) return []
   const items = await loadRegistry(extra)
@@ -359,22 +368,27 @@ async function recommendFromShadcn(
 
   const picks: RegistryItem[] = []
   const push = (it?: RegistryItem): void => {
-    if (it && !picks.some((p) => p.name === it.name && p.registry === it.registry)) picks.push(it)
+    if (!it || isFullPageShell(it.name, it.type, it.description)) return
+    if (!picks.some((p) => p.name === it.name && p.registry === it.registry)) picks.push(it)
   }
 
-  const roleList = primitivesOnly
-    ? (ROLE_COMPONENTS[section.role] ?? []).filter((n) =>
-        /^(button|label|input|checkbox|dialog|sheet|dropdown-menu|navigation-menu|form|field|select)$/.test(n)
-      )
-    : (ROLE_COMPONENTS[section.role] ?? [])
+  // Mobbin gaps first — the missing unique primitives.
+  for (const g of gaps) {
+    for (const n of g.shadcn) push(byName.get(`@shadcn/${n}`))
+    for (const it of searchRegistry(items, g.query, 3)) push(it)
+  }
 
+  // Thin role-matched a11y / structure primitives (never full shells).
+  const roleList = (ROLE_COMPONENTS[section.role] ?? []).filter((n) =>
+    /^(button|label|input|checkbox|dialog|sheet|dropdown-menu|navigation-menu|form|field|select|empty|skeleton|table|pagination|command|sonner|tabs|breadcrumb)$/.test(
+      n
+    )
+  )
   for (const n of roleList) push(byName.get(`@shadcn/${n}`))
 
-  if (!primitivesOnly) {
-    const textQuery = [section.label, ...section.headings.slice(0, 2), ...section.ctaLabels.slice(0, 2)].join(' ')
-    for (const it of searchRegistry(items, textQuery, 4)) push(it)
-    for (const b of BLOCKS.filter((b) => b.roles.includes(section.role))) push(byName.get(`@shadcn/${b.name}`))
-  }
+  const textQuery = [section.label, ...section.headings.slice(0, 2), ...section.ctaLabels.slice(0, 2)].join(' ')
+  for (const it of searchRegistry(items, textQuery, 3)) push(it)
+  for (const b of BLOCKS.filter((b) => b.roles.includes(section.role))) push(byName.get(`@shadcn/${b.name}`))
 
   return picks.slice(0, limit).map((it) => ({
     name: it.name,

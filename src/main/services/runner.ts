@@ -9,7 +9,7 @@ import { auditPage, dedupeFindings, diffFindingsAgainstPrior, fixedFindingsSince
 import { critiquePage, critiqueSectionAgainstReferences, finalVerdict, makeCritic, proposeFlows } from './critic.js'
 import { credsFromSettings } from './providers.js'
 import { probeInteractions } from './interaction.js'
-import { flowInventory, heuristicFlows, validateFlows } from './flows.js'
+import { flowInventory, heuristicFlows, detailRecordFlows, validateFlows } from './flows.js'
 import { performLogin } from './auth.js'
 import { modelFor } from '../../shared/types.js'
 import { closeMobbin, searchScreens, searchSections, searchFlows } from './mobbin.js'
@@ -654,7 +654,7 @@ export async function executeRun(
 
     /* 5. registry recommendations — only immature / heavily repeated sections */
     if (cfg.useShadcn) {
-      progress('components', 78, 'Matching weak/repeated sections to Shoogle + shadcn')
+      progress('components', 78, 'Matching Mobbin gaps to Shoogle + shadcn components')
       let skippedMature = 0
       const picks: ReturnType<typeof pickSectionsForRecommendations> = []
       for (const page of run.pages) {
@@ -670,8 +670,22 @@ export async function executeRun(
           async (pick) => {
             checkpoint()
             try {
+              const refs = run.references.filter(
+                (r) => r.sectionId === pick.section.id || (!r.sectionId && r.kind !== 'flow')
+              )
+              // Resolve page URL from findings or section ownership across pages.
+              const pageUrl =
+                run.pages.find((p) => p.sections.some((s) => s.id === pick.section.id))?.url ??
+                run.findings.find((f) => f.sectionId === pick.section.id)?.pageUrl
               const rec = await raceCancel(
-                recommendForSection(pick.section, pick.problems, settings.extraRegistries, true)
+                recommendForSection(
+                  pick.section,
+                  pick.problems,
+                  settings.extraRegistries,
+                  true,
+                  refs,
+                  pageUrl
+                )
               )
               rec.reason = `[${pick.reasons.join(', ')}] ${rec.reason}`
               return rec
@@ -697,7 +711,7 @@ export async function executeRun(
       progress(
         'components',
         84,
-        `${run.recommendations.length} section recommendation(s) · ${shoogleBacked} with Shoogle community blocks${shoogleBacked === 0 ? ' (shadcn-only fallback)' : ''}`
+        `${run.recommendations.length} section recommendation(s) · ${shoogleBacked} with Shoogle components${shoogleBacked === 0 ? ' (shadcn-only fallback)' : ''}`
       )
       await saveRun(run)
     }
@@ -759,6 +773,22 @@ export async function executeRun(
         )
       }
     }
+
+    // AI flows often hop sidebar labels and never open detail/ID records.
+    // Always append crawl-proven list→detail journeys so depth is exercised.
+    if (runnable.length > 0) {
+      const deep = validateFlows(detailRecordFlows(run.pages), run.pages).filter((f) => !f.invalid)
+      const covered = new Set(runnable.map((f) => f.name.toLowerCase()))
+      let added = 0
+      for (const d of deep) {
+        if (covered.has(d.name.toLowerCase())) continue
+        runnable.push({ ...d })
+        covered.add(d.name.toLowerCase())
+        added++
+      }
+      if (added) log('info', `Added ${added} list→detail flow(s) for depth coverage`)
+    }
+
     if (runnable.length === 0) {
       log('info', 'No runnable flows for this product — skipping the flow phase.')
     }

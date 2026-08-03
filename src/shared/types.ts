@@ -333,6 +333,8 @@ export interface MobbinReference {
 
 export interface ComponentRecommendation {
   sectionId: string
+  /** Page this section was captured on — used for page-scoped fix prompts. */
+  pageUrl?: string
   sectionRole: SectionRole
   reason: string
   /** Which catalogue answered: shoogle (community registries) or shadcn (first-party). */

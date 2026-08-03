@@ -186,6 +186,11 @@ export function validateFlow(
         problems.push('assertText step has no text to assert')
         continue
       }
+      // "body" / "html" always match and prove nothing about the journey.
+      if (/^(body|html|document|page|content)$/i.test(needle)) {
+        problems.push(`assertText "${needle}" is too vague to prove the journey worked`)
+        continue
+      }
       const seen = allText.some((t) => t.includes(needle)) || [...allHandles].some((h) => h.includes(needle))
       if (!seen) problems.push(`text "${needle}" was never seen on any crawled page`)
       else
@@ -219,6 +224,19 @@ export function validateFlows(
 /** Compact, verbatim inventory for grounding a model's flow proposals. */
 export function flowInventory(pages: CapturedPage[]): string {
   const lines: string[] = []
+  const paths = pages.map((p) => {
+    try {
+      return new URL(p.url).pathname.replace(/\/$/, '') || '/'
+    } catch {
+      return '/'
+    }
+  })
+  const detailHint = paths.filter((p) => p.split('/').filter(Boolean).length >= 2)
+  if (detailHint.length) {
+    lines.push(
+      `DETAIL/ID ROUTES (prefer opening these from their parent list): ${detailHint.slice(0, 20).join(', ')}${detailHint.length > 20 ? ', …' : ''}`
+    )
+  }
   for (const p of pages) {
     let path = p.url
     try {
@@ -242,11 +260,91 @@ export function flowInventory(pages: CapturedPage[]): string {
       })
       .filter(Boolean)
       .slice(0, 12)
+    const depth = (path.replace(/\/$/, '') || '/').split('/').filter(Boolean).length
     lines.push(
-      `ROUTE ${path}\n  clickable: ${clickable.join(' | ') || '(none)'}\n  fields: ${fields.join(' | ') || '(none)'}`
+      `ROUTE ${path}${depth >= 2 ? ' [detail]' : ''}\n  clickable: ${clickable.join(' | ') || '(none)'}\n  fields: ${fields.join(' | ') || '(none)'}`
     )
   }
   return lines.join('\n')
+}
+
+/**
+ * Open list → detail/ID routes the crawl already discovered.
+ *
+ * Sidebar-hopping flows never exercise record views. When the crawl found
+ * `/tasks/…` under `/tasks`, replay that nesting so a broken detail page is
+ * called out as a flow failure, not only an interaction nit.
+ */
+export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps: FlowStep[] }[] {
+  const ok = pages.filter((p) => p.ok && p.status < 400)
+  if (ok.length === 0) return []
+
+  type Entry = { path: string; page: CapturedPage }
+  const entries: Entry[] = ok.map((page) => ({ path: pathOf(page.url).split('?')[0] || '/', page }))
+
+  const byPath = new Map(entries.map((e) => [e.path.replace(/\/$/, '') || '/', e]))
+  const groups = new Map<string, Entry[]>()
+
+  for (const e of entries) {
+    const path = e.path.replace(/\/$/, '') || '/'
+    const parts = path.split('/').filter(Boolean)
+    if (parts.length < 2) continue
+    const parent = `/${parts.slice(0, -1).join('/')}`
+    if (!byPath.has(parent)) continue
+    const list = groups.get(parent) ?? []
+    list.push(e)
+    groups.set(parent, list)
+  }
+
+  const flows: { name: string; steps: FlowStep[] }[] = []
+  for (const [parent, details] of groups) {
+    const listPage = byPath.get(parent)?.page
+    if (!listPage) continue
+    const sample = details.slice(0, 2)
+    const steps: FlowStep[] = [
+      { action: 'goto', target: parent, intent: `Open list ${parent}` }
+    ]
+    const listAssert = assertionFor(listPage)
+    if (listAssert) {
+      steps.push({ action: 'assertText', value: listAssert, intent: `Confirm list “${listAssert}”` })
+    }
+    for (const d of sample) {
+      const detailPath = d.path.replace(/\/$/, '') || '/'
+      steps.push({
+        action: 'goto',
+        target: detailPath,
+        note: d.page.title,
+        intent: `Open detail ${detailPath}`
+      })
+      const detailAssert = assertionFor(d.page)
+      if (detailAssert) {
+        steps.push({
+          action: 'assertText',
+          value: detailAssert,
+          intent: `Confirm detail “${detailAssert}”`
+        })
+      }
+      // Prefer a real in-page control when the crawl saw one — proves interactivity
+      // beyond "the URL loaded".
+      const actionLabel = (d.page.controls ?? [])
+        .map((c) => (c.text || c.ariaLabel || '').trim())
+        .find((l) => l.length > 1 && l.length < 28 && !UNSAFE.test(l))
+      if (actionLabel) {
+        steps.push({
+          action: 'click',
+          target: `text=${actionLabel}`,
+          intent: `Activate “${actionLabel}” on the detail`
+        })
+        steps.push({ action: 'wait', value: '800', intent: 'Wait for detail interaction' })
+      }
+    }
+    if (steps.filter((s) => s.action === 'goto').length < 2) continue
+    flows.push({
+      name: `Open ${parent} detail records`,
+      steps
+    })
+  }
+  return flows.slice(0, 6)
 }
 
 /**
@@ -276,6 +374,9 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
     if (assertion) sweep.push({ action: 'assertText', value: assertion, intent: `Confirm “${assertion}”` })
   }
   if (sweep.length >= 2) flows.push({ name: 'Visit every discovered route', steps: sweep })
+
+  /* 1b. List → detail/ID records — the deep product journeys. */
+  flows.push(...detailRecordFlows(ok))
 
   /* 2. Primary conversion path — hero CTA on the entry page. */
   const entry = ok[0]

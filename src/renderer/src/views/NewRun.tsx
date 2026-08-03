@@ -234,7 +234,7 @@ export default function NewRun({
           checked={useShadcn}
           onChange={setUseShadcn}
           label="Component replacements"
-          hint={status?.shoogle.ok ? 'Shoogle community registries, shadcn fallback' : 'shadcn registry only — Shoogle unreachable'}
+          hint={status?.shoogle.ok ? 'Shoogle + shadcn for missing Mobbin-matched components' : 'shadcn only — Shoogle unreachable'}
         />
         <Toggle
           checked={useGemini}

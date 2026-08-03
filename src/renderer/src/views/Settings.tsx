@@ -374,9 +374,10 @@ export default function SettingsView({
 
       <Panel title="Component sources">
         <p className="mb-2 text-[11px] leading-snug text-zinc-500">
-          <span className="text-zinc-300">Shoogle</span> (mcp.shoogle.dev) is queried first — 11,000+ blocks across every
-          community shadcn registry. The first-party <span className="text-zinc-300">shadcn</span> registry is the
-          fallback and supplies primitives. Extra registries below are merged into the shadcn side.
+          <span className="text-zinc-300">Shoogle</span> (mcp.shoogle.dev) is queried for unique components
+          Mobbin references show that the audited UI is missing — not whole dashboard shells. First-party{' '}
+          <span className="text-zinc-300">shadcn</span> fills primitives. Extra registries below merge into the
+          shadcn side.
         </p>
         <div className="mb-3 space-y-1 text-[12px]">
           <div className={cx(status?.shoogle.ok ? 'text-emerald-400' : 'text-amber-400')}>Shoogle: {status?.shoogle.detail}</div>

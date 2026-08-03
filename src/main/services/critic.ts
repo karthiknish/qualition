@@ -248,16 +248,17 @@ HARD RULES — a flow that breaks any of these will be discarded:
 - goto targets MUST be one of the ROUTE paths listed below. Do not invent /login, /contact, /pricing or any other route that is not listed.
 - click targets MUST use a label copied EXACTLY from that route's "clickable" list, as "text=<label>".
 - fill targets MUST use a handle copied EXACTLY from that route's "fields" list ("placeholder=…", "label=…" or a [name=…] selector).
-- assertText values MUST be text that appears in the inventory.
+- assertText values MUST be distinctive visible copy from the inventory — never "body", "html", "page", or "content".
 - if a route has no fields, do not propose a form flow for it.
 - never pay, purchase, delete, or create a real account; use qualition+test@example.com for any email field.
-- 4–12 steps per flow, ending with an assertText that proves the journey worked.
+- 5–12 steps per flow, ending with an assertText that proves the journey worked.
 
-WHAT MAKES A GOOD FLOW HERE: click *through* the product. A flow that only opens URLs proves
-almost nothing — prefer journeys that click a control, verify the resulting screen, then act again
-from there (open a menu → pick an item → assert the destination; filter a table → assert the rows
-changed; open a dialog → interact → close it). Chain 3+ clicks where the inventory supports it, and
-put an assertText after each click so a dead control is caught at the exact step it fails.
+WHAT MAKES A GOOD FLOW HERE: go *deep* into the product. Prefer journeys that:
+1. Open a list/index route, then goto a nested detail/ID route from the inventory (e.g. /tasks → /tasks/<id>), assert the detail, interact with a control there.
+2. Fill a real field, assert something changed, then navigate onward.
+3. Chain 3+ clicks with an assertText after each so a dead control is caught at the exact step.
+
+Sidebar-only hops (Overview → Tasks → Review with no detail open) are weak — include at least 2 flows that visit a nested detail route when the inventory lists any.
 
 Propose up to 8 flows, covering different routes rather than variations of one. If the inventory
 does not support a meaningful flow, return fewer — an empty list is a valid answer.
