@@ -355,7 +355,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
           `${polish.skeletonWithoutMinHeight} skeleton/pulse placeholders without reserved height`,
           'Zero-height skeletons collapse layout until content arrives (CLS). Skeleton screens should mirror the final content wireframe, not a blank frame (NN/G).',
           'Give each skeleton a min-height (or aspect-ratio) matching the loaded card/row so the page does not jump.',
-          { effort: 'one-line', confidence: 'medium' }
+          { effort: 'one-line', confidence: 'low' }
         )
       )
     } else if ((polish.skeletonCount ?? 0) >= 3 && (polish.ariaBusyCount ?? 0) === 0) {
@@ -367,7 +367,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
           'Loading skeletons present without aria-busy',
           'Sighted users see placeholders; assistive tech may not know content is still loading.',
           'Set aria-busy="true" on the loading region (and clear it when content resolves); optionally aria-live="polite".',
-          { effort: 'one-line', confidence: 'medium' }
+          { effort: 'one-line', confidence: 'low' }
         )
       )
     }
