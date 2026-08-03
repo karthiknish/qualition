@@ -992,6 +992,67 @@ export const extractFn = function (): any {
   }
 }
 
+/**
+ * Secondary viewports only need overflow / tap / overlap signals + a screenshot.
+ * Full token/section/CSS extraction stays on the primary (desktop) pass.
+ */
+export const responsiveOnlyFn = function (): {
+  horizontalOverflowPx: number
+  tinyTextCount: number
+  smallTapTargets: number
+  overlaps: number
+} {
+  const vw = window.innerWidth
+  let horizontalOverflowPx = Math.max(0, document.documentElement.scrollWidth - vw)
+  let tinyTextCount = 0
+  let smallTapTargets = 0
+  let overlaps = 0
+  const isDevChrome = (el: Element | null): boolean => {
+    const w = window as unknown as { __qualitionIsDevChrome?: (e: Element | null) => boolean }
+    if (typeof w.__qualitionIsDevChrome === 'function') return w.__qualitionIsDevChrome(el)
+    return false
+  }
+  const isVisible = (el: Element): boolean => {
+    const r = el.getBoundingClientRect()
+    if (r.width < 1 || r.height < 1) return false
+    const cs = getComputedStyle(el)
+    return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0'
+  }
+  const sample = Array.from(document.querySelectorAll('body *'))
+    .filter((el) => isVisible(el) && !isDevChrome(el))
+    .slice(0, 400)
+  for (const el of sample) {
+    const r = el.getBoundingClientRect()
+    if (r.right > vw + 1) horizontalOverflowPx = Math.max(horizontalOverflowPx, Math.round(r.right - vw))
+    const cs = getComputedStyle(el)
+    const txt = (el.textContent || '').trim()
+    if (txt.length >= 4 && el.children.length === 0 && parseFloat(cs.fontSize) < 12) tinyTextCount++
+    const clickable =
+      el.tagName === 'A' ||
+      el.tagName === 'BUTTON' ||
+      el.getAttribute('role') === 'button' ||
+      (el as HTMLElement).onclick != null
+    if (clickable && (r.height < 32 || r.width < 32) && r.height > 0) smallTapTargets++
+  }
+  // Cheap overlap sample: adjacent pairs in document order among large boxes.
+  const boxes = sample
+    .filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.width > 40 && r.height > 40
+    })
+    .slice(0, 80)
+  for (let i = 0; i < boxes.length; i++) {
+    const a = boxes[i].getBoundingClientRect()
+    for (let j = i + 1; j < Math.min(i + 6, boxes.length); j++) {
+      const b = boxes[j].getBoundingClientRect()
+      const ox = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left))
+      const oy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top))
+      if (ox > 20 && oy > 20 && ox * oy > 400) overlaps++
+    }
+  }
+  return { horizontalOverflowPx, tinyTextCount, smallTapTargets, overlaps }
+}
+
 /** Installed before navigation so LCP/CLS/long-tasks are observed from t=0. */
 export const observerInit = function (): void {
   try {

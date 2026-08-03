@@ -1703,6 +1703,21 @@ test('pickSectionsForRecommendations skips mature unique sections', async () => 
   assert.equal(picks.filter((p) => p.reasons.includes('repeated-role')).length, 1)
 })
 
+test('mapPool runs with bounded concurrency and preserves order', async () => {
+  const { mapPool } = await import('../src/main/services/pool.js')
+  let live = 0
+  let peak = 0
+  const out = await mapPool([1, 2, 3, 4, 5], 2, async (n) => {
+    live++
+    peak = Math.max(peak, live)
+    await new Promise((r) => setTimeout(r, 20))
+    live--
+    return n * 10
+  })
+  assert.deepEqual(out, [10, 20, 30, 40, 50])
+  assert.ok(peak <= 2, `peak concurrency was ${peak}`)
+})
+
 test('partitionProductFindings excludes Agentation selectors from product grade', async () => {
   const { partitionProductFindings, ownershipFromSelector } = await import('../src/main/services/provenance.js')
   assert.equal(

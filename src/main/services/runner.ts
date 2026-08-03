@@ -24,6 +24,7 @@ import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
 import { applyProductionPresence, partitionProductFindings } from './provenance.js'
+import { mapPool } from './pool.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
 
 type Emit = (p: RunProgress) => void
@@ -269,175 +270,255 @@ export async function executeRun(
     progress('heuristics', 36, `${findings.length} heuristic finding(s) · ${run.themeSummary}`)
     await saveRun(run)
 
-    /* 2a. Lighthouse + pa11y — independent Chrome passes, soft-fail */
-    try {
+    /* 2a. Lighthouse ∥ pa11y ∥ visual-diff — independent Chrome / CPU work */
+    {
       checkpoint()
-      progress('lighthouse', 38, 'Running Lighthouse (perf / a11y / best-practices / SEO)')
       const primary = run.pages[0]?.url ?? cfg.targetUrl
       const skipSeo = run.archetype?.archetype === 'app'
-      const lh = await raceCancel(
-        runLighthouse(primary, {
-          storageStatePath: storageState,
-          skipSeo,
-          onLog: (m) => log('info', m)
-        })
-      )
-      if (lh) {
-        run.lighthouse = lh.scores
-        run.findings.push(...lh.findings)
-        if (lh.failed) {
-          run.lighthouseNote = lh.failReason ?? 'Lighthouse did not complete'
-        } else if (skipSeo) {
-          run.lighthouseNote = 'SEO category skipped for signed-in / app UI'
-        }
-      }
-    } catch (e) {
-      if ((e as Error).name === 'CancelledError') throw e
-      log('warn', `Lighthouse failed: ${(e as Error).message}`)
-      run.lighthouseNote = (e as Error).message.slice(0, 200)
-      run.findings.push({
-        id: `lh-fail-${Date.now()}`,
-        category: 'flow',
-        severity: 'minor',
-        title: 'Lighthouse could not run',
-        detail: (e as Error).message.slice(0, 200),
-        fix: 'Re-run the audit. If this persists, check that Chrome can launch.',
-        pageUrl: cfg.targetUrl,
-        source: 'lighthouse'
-      })
-    }
-
-    try {
-      checkpoint()
-      progress('pa11y', 40, 'Running pa11y (HTML_CodeSniffer)')
-      const primary = run.pages[0]?.url ?? cfg.targetUrl
       const knownAxeIds = new Set(run.pages.flatMap((p) => p.axe.map((v) => v.id)))
-      const p11y = await raceCancel(
-        runPa11y(primary, {
-          storageStatePath: storageState,
-          knownAxeIds,
-          onLog: (m) => log('info', m)
-        })
-      )
-      if (p11y) run.findings.push(...p11y.findings)
-    } catch (e) {
-      if ((e as Error).name === 'CancelledError') throw e
-      log('warn', `pa11y failed: ${(e as Error).message}`)
-      run.findings.push({
-        id: `p11y-fail-${Date.now()}`,
-        category: 'accessibility',
-        severity: 'minor',
-        title: 'pa11y could not run',
-        detail: (e as Error).message.slice(0, 200),
-        fix: 'Re-run the audit. axe still covers the primary accessibility pass.',
-        pageUrl: cfg.targetUrl,
-        source: 'pa11y'
-      })
-    }
-    await saveRun(run)
+      progress('lighthouse', 38, 'Running Lighthouse + pa11y in parallel')
 
-    /* 2b. visual regression against the previous audit of the same target */
-    try {
-      const previous = (await listRuns()).find(
-        (r) => r.id !== run.id && r.status === 'done' && r.config.targetUrl === cfg.targetUrl
+      const previousPromise = listRuns().then((runs) =>
+        runs.find((r) => r.id !== run.id && r.status === 'done' && r.config.targetUrl === cfg.targetUrl)
       )
-      if (previous) {
-        const { diffs, findings: vrFindings } = await compareWithBaseline(run.pages, previous, assets)
-        run.visualDiffs = diffs
-        run.findings.push(...vrFindings)
-        progress('visual-diff', 42, `Compared against run ${previous.id}: ${diffs.length} viewport diff(s), ${vrFindings.length} regression finding(s)`)
+
+      const [lhSettled, pa11ySettled, visualSettled] = await Promise.all([
+        raceCancel(
+          runLighthouse(primary, {
+            storageStatePath: storageState,
+            skipSeo,
+            onLog: (m) => log('info', m)
+          })
+        )
+          .then((v) => ({ ok: true as const, v }))
+          .catch((e) => ({ ok: false as const, e })),
+        raceCancel(
+          runPa11y(primary, {
+            storageStatePath: storageState,
+            knownAxeIds,
+            onLog: (m) => log('info', m)
+          })
+        )
+          .then((v) => ({ ok: true as const, v }))
+          .catch((e) => ({ ok: false as const, e })),
+        previousPromise
+          .then(async (previous) => {
+            if (!previous) return { ok: true as const, previous: null, diffs: null }
+            const result = await compareWithBaseline(run.pages, previous, assets)
+            return { ok: true as const, previous, diffs: result }
+          })
+          .catch((e) => ({ ok: false as const, e }))
+      ])
+
+      if (lhSettled.ok) {
+        const lh = lhSettled.v
+        if (lh) {
+          run.lighthouse = lh.scores
+          run.findings.push(...lh.findings)
+          if (lh.failed) {
+            run.lighthouseNote = lh.failReason ?? 'Lighthouse did not complete'
+          } else if (skipSeo) {
+            run.lighthouseNote = 'SEO category skipped for signed-in / app UI'
+          }
+        }
       } else {
-        log('info', 'No previous run for this target — this run becomes the visual baseline.')
+        if ((lhSettled.e as Error).name === 'CancelledError') throw lhSettled.e
+        log('warn', `Lighthouse failed: ${(lhSettled.e as Error).message}`)
+        run.lighthouseNote = (lhSettled.e as Error).message.slice(0, 200)
+        run.findings.push({
+          id: `lh-fail-${Date.now()}`,
+          category: 'flow',
+          severity: 'minor',
+          title: 'Lighthouse could not run',
+          detail: (lhSettled.e as Error).message.slice(0, 200),
+          fix: 'Re-run the audit. If this persists, check that Chrome can launch.',
+          pageUrl: cfg.targetUrl,
+          source: 'lighthouse'
+        })
       }
-    } catch (e) {
-      log('warn', `visual diff failed: ${(e as Error).message}`)
+
+      if (pa11ySettled.ok) {
+        const p11y = pa11ySettled.v
+        if (p11y) run.findings.push(...p11y.findings)
+      } else {
+        if ((pa11ySettled.e as Error).name === 'CancelledError') throw pa11ySettled.e
+        log('warn', `pa11y failed: ${(pa11ySettled.e as Error).message}`)
+        run.findings.push({
+          id: `p11y-fail-${Date.now()}`,
+          category: 'accessibility',
+          severity: 'minor',
+          title: 'pa11y could not run',
+          detail: (pa11ySettled.e as Error).message.slice(0, 200),
+          fix: 'Re-run the audit. axe still covers the primary accessibility pass.',
+          pageUrl: cfg.targetUrl,
+          source: 'pa11y'
+        })
+      }
+
+      if (visualSettled.ok) {
+        if (visualSettled.diffs && visualSettled.previous) {
+          run.visualDiffs = visualSettled.diffs.diffs
+          run.findings.push(...visualSettled.diffs.findings)
+          progress(
+            'visual-diff',
+            42,
+            `Compared against run ${visualSettled.previous.id}: ${visualSettled.diffs.diffs.length} viewport diff(s), ${visualSettled.diffs.findings.length} regression finding(s)`
+          )
+        } else {
+          log('info', 'No previous run for this target — this run becomes the visual baseline.')
+        }
+      } else {
+        log('warn', `visual diff failed: ${(visualSettled.e as Error).message}`)
+      }
+      await saveRun(run)
     }
 
-    /* 2c. deep interaction probe — actually operate the UI */
+    /* 2c. deep interaction probe — deepest pages, parallel pair, tighter budget */
     if (cfg.useInteractionProbe) {
       const probeViewport = (cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS)[0]
+      const PROBE_PAGE_CAP = 5
+      const PROBE_CONCURRENCY = 2
+      const PROBE_BUDGET_MS = 60_000
       // Prefer deeper routes (detail pages) — list shells alone miss the real UI.
       const probeTargets = [...run.pages]
         .sort((a, b) => {
-          const da = (() => {
+          const depthOf = (u: string): number => {
             try {
-              return new URL(a.url).pathname.split('/').filter(Boolean).length
+              return new URL(u).pathname.split('/').filter(Boolean).length
             } catch {
               return 0
             }
-          })()
-          const db = (() => {
-            try {
-              return new URL(b.url).pathname.split('/').filter(Boolean).length
-            } catch {
-              return 0
-            }
-          })()
-          return db - da
+          }
+          return depthOf(b.url) - depthOf(a.url)
         })
-        .slice(0, 16)
-      for (const page of probeTargets) {
-        checkpoint()
-        progress('interaction', 44, `Operating controls on ${page.url}`)
-        try {
-          const { report, findings: probeFindings } = await raceCancel(
-            probeInteractions(browser, page.url, {
-            outDir: assets,
-            viewport: probeViewport,
-            maxControls: settings.maxControlsProbed ?? 30,
-              budgetMs: 120_000,
-              storageState,
-              onLog: (m) => log('warn', m)
-            })
-          )
-          run.interactions.push(report)
-          run.findings.push(...probeFindings)
-          log('info', `${page.url}: probed ${report.controlsProbed} controls → ${probeFindings.length} finding(s), ${report.deadClicks.length} dead click(s)`)
-        } catch (e) {
-          log('warn', `interaction probe failed: ${(e as Error).message}`)
+        .slice(0, PROBE_PAGE_CAP)
+      if (run.pages.length > PROBE_PAGE_CAP) {
+        log(
+          'info',
+          `Interaction probe capped at ${PROBE_PAGE_CAP} deepest page(s) (of ${run.pages.length}); concurrency ${PROBE_CONCURRENCY}`
+        )
+      }
+      progress('interaction', 44, `Probing ${probeTargets.length} page(s) (×${PROBE_CONCURRENCY})`)
+      let probedDone = 0
+      try {
+        const probeResults = await mapPool(
+          probeTargets,
+          PROBE_CONCURRENCY,
+          async (page) => {
+            checkpoint()
+            try {
+              const { report, findings: probeFindings } = await raceCancel(
+                probeInteractions(browser, page.url, {
+                  outDir: assets,
+                  viewport: probeViewport,
+                  maxControls: settings.maxControlsProbed ?? 30,
+                  budgetMs: PROBE_BUDGET_MS,
+                  storageState,
+                  onLog: (m) => log('warn', m)
+                })
+              )
+              probedDone++
+              progress(
+                'interaction',
+                44 + Math.round((probedDone / Math.max(1, probeTargets.length)) * 5),
+                `Probed ${probedDone}/${probeTargets.length}: ${page.url}`
+              )
+              log(
+                'info',
+                `${page.url}: probed ${report.controlsProbed} controls → ${probeFindings.length} finding(s), ${report.deadClicks.length} dead click(s)`
+              )
+              return { report, findings: probeFindings }
+            } catch (e) {
+              if ((e as Error).name === 'CancelledError') throw e
+              log('warn', `interaction probe failed: ${(e as Error).message}`)
+              return null
+            }
+          },
+          { shouldStop: () => state.cancelled }
+        )
+        for (const r of probeResults) {
+          if (!r) continue
+          run.interactions.push(r.report)
+          run.findings.push(...r.findings)
         }
+      } catch (e) {
+        if ((e as Error).message === 'cancelled' || (e as Error).name === 'CancelledError') throw new CancelledError()
+        throw e
       }
       progress('interaction', 50, `${run.interactions.reduce((n, i) => n + i.controlsProbed, 0)} controls exercised`)
       await saveRun(run)
     }
 
-    /* 3. Mobbin references per distinct section role */
+    /* 3. Mobbin references — distinct queries in parallel */
     if (cfg.useMobbin) {
       progress('mobbin', 45, 'Pulling reference UI from Mobbin')
       // One search per *distinct screen intent*, built from the route,
       // headings and controls rather than a generic role template.
       const seenQueries = new Set<string>()
+      const screenJobs: { query: string; sectionId: string; role: string; path: string }[] = []
       for (const page of run.pages) {
         for (const s of page.sections) {
-          checkpoint()
           if (seenQueries.size >= 10) break
           const query = queryForSection(s, page, detected.archetype, cfg.productContext)
           if (seenQueries.has(query)) continue
           seenQueries.add(query)
-          log('info', `Mobbin query (${s.role} @ ${new URL(page.url).pathname}): ${query}`)
+          let path = '/'
           try {
-            const refs = await raceCancel(
-              searchScreens(query, { platform: 'web', limit: 3, outDir: assets, sectionId: s.id })
-            )
-            run.references.push(...refs)
-          } catch (e) {
-            if (state.cancelled) throw new CancelledError()
-            log('warn', `Mobbin screens (${s.role}): ${(e as Error).message}`)
+            path = new URL(page.url).pathname
+          } catch {
+            /* ignore */
           }
-          // Section search only pays off for marketing-style pages; app screens
-          // are better matched by whole screens.
-          if (detected.archetype !== 'app') {
-            try {
-              const secRefs = await raceCancel(
-                searchSections(query, { limit: 2, outDir: assets, sectionId: s.id })
-              )
-              run.references.push(...secRefs)
-            } catch (e) {
-              if (state.cancelled) throw new CancelledError()
-              log('warn', `Mobbin sections (${s.role}): ${(e as Error).message}`)
-            }
-          }
+          screenJobs.push({ query, sectionId: s.id, role: s.role, path })
         }
+      }
+      const MOBBIN_CONCURRENCY = 3
+      try {
+        const batches = await mapPool(
+          screenJobs,
+          MOBBIN_CONCURRENCY,
+          async (job) => {
+            checkpoint()
+            log('info', `Mobbin query (${job.role} @ ${job.path}): ${job.query}`)
+            const refs = []
+            try {
+              refs.push(
+                ...(await raceCancel(
+                  searchScreens(job.query, {
+                    platform: 'web',
+                    limit: 3,
+                    outDir: assets,
+                    sectionId: job.sectionId
+                  })
+                ))
+              )
+            } catch (e) {
+              if (state.cancelled || (e as Error).name === 'CancelledError') throw new CancelledError()
+              log('warn', `Mobbin screens (${job.role}): ${(e as Error).message}`)
+            }
+            // Section search only pays off for marketing-style pages; app screens
+            // are better matched by whole screens.
+            if (detected.archetype !== 'app') {
+              try {
+                refs.push(
+                  ...(await raceCancel(
+                    searchSections(job.query, { limit: 2, outDir: assets, sectionId: job.sectionId })
+                  ))
+                )
+              } catch (e) {
+                if (state.cancelled || (e as Error).name === 'CancelledError') throw new CancelledError()
+                log('warn', `Mobbin sections (${job.role}): ${(e as Error).message}`)
+              }
+            }
+            return refs
+          },
+          { shouldStop: () => state.cancelled }
+        )
+        for (const batch of batches) run.references.push(...batch)
+      } catch (e) {
+        if ((e as Error).message === 'cancelled' || (e as Error).name === 'CancelledError') {
+          throw new CancelledError()
+        }
+        throw e
       }
       try {
         const flowQuery = queryForFlows(detected.archetype, cfg.productContext, run.pages)
@@ -451,13 +532,14 @@ export async function executeRun(
       await saveRun(run)
     }
 
-    /* 4. AI critique */
+    /* 4. AI critique — bounded pages, concurrent requests */
     if (aiEnabled) {
       // Each critique is a slow network round trip, so the work has to be
       // bounded: an "everything" crawl of 24 pages would otherwise queue ~48
       // sequential requests (tens of minutes) behind a single progress tick.
       const PAGE_BUDGET = 12
       const SECTION_BUDGET = 12
+      const CRITIQUE_CONCURRENCY = 3
       const ranked = [...run.pages].sort(
         (a, b) =>
           run.findings.filter((f) => f.pageUrl === b.url).length -
@@ -470,46 +552,90 @@ export async function executeRun(
           `Critiquing the ${PAGE_BUDGET} pages with the most findings; skipping ${ranked.length - PAGE_BUDGET} quieter page(s) to keep the run bounded`
         )
       }
-      let sectionBudgetLeft = SECTION_BUDGET
       progress(
         'critique',
         58,
-        `Critiquing ${targetsForCritique.length} page(s) with ${cfg.provider}/${model}${critic.supportsVision ? '' : ' (text-only)'}`
+        `Critiquing ${targetsForCritique.length} page(s) with ${cfg.provider}/${model} (×${CRITIQUE_CONCURRENCY})${critic.supportsVision ? '' : ' (text-only)'}`
       )
 
-      for (const [index, page] of targetsForCritique.entries()) {
-        checkpoint()
-        // 58 -> 74 spread across the pages so the UI never looks frozen.
-        const pct = 58 + Math.round(((index + 1) / targetsForCritique.length) * 14)
-        progress('critique', pct, `Critiquing ${index + 1}/${targetsForCritique.length}: ${new URL(page.url).pathname || '/'}`)
-        const interaction = run.interactions.find((i) => i.url === page.url)
-        try {
-          const res = await raceCancel(critiquePage(critic, model, page, cfg, interaction))
-          run.findings.push(...res.findings)
-          if (res.themeRead) run.themeSummary = `${run.themeSummary}\n\n${res.themeRead}`
-          log('info', `${cfg.provider}: ${res.findings.length} finding(s) on ${page.url}`)
-        } catch (e) {
-          if (state.cancelled) throw new CancelledError()
-          log('error', `page critique failed on ${page.url}: ${(e as Error).message}`)
+      let pagesDone = 0
+      try {
+        const pageCritiques = await mapPool(
+          targetsForCritique,
+          CRITIQUE_CONCURRENCY,
+          async (page, index) => {
+            checkpoint()
+            const interaction = run.interactions.find((i) => i.url === page.url)
+            try {
+              const res = await raceCancel(critiquePage(critic, model, page, cfg, interaction))
+              pagesDone++
+              progress(
+                'critique',
+                58 + Math.round((pagesDone / Math.max(1, targetsForCritique.length)) * 10),
+                `Critiqued ${pagesDone}/${targetsForCritique.length}: ${new URL(page.url).pathname || '/'}`
+              )
+              log('info', `${cfg.provider}: ${res.findings.length} finding(s) on ${page.url}`)
+              return { page, index, res, error: null as string | null }
+            } catch (e) {
+              if (state.cancelled || (e as Error).name === 'CancelledError') throw new CancelledError()
+              log('error', `page critique failed on ${page.url}: ${(e as Error).message}`)
+              return { page, index, res: null, error: (e as Error).message }
+            }
+          },
+          { shouldStop: () => state.cancelled }
+        )
+
+        for (const row of pageCritiques) {
+          if (!row.res) continue
+          run.findings.push(...row.res.findings)
+          if (row.res.themeRead) run.themeSummary = `${run.themeSummary}\n\n${row.res.themeRead}`
         }
-        // section-level comparison against references, worst sections first
-        const targets = page.sections
-          .filter((s) => s.screenshot)
-          .sort((a, b) => b.rect.height - a.rect.height)
-          .slice(0, Math.max(0, Math.min(3, sectionBudgetLeft)))
-        for (const s of targets) {
-          checkpoint()
-          if (sectionBudgetLeft <= 0) break
-          sectionBudgetLeft--
-          const refs = run.references.filter((r) => r.sectionId === s.id)
-          try {
-            run.findings.push(...(await raceCancel(critiqueSectionAgainstReferences(critic, model, page, s, refs, cfg))))
-          } catch (e) {
-            if (state.cancelled) throw new CancelledError()
-            log('warn', `section critique ${s.id}: ${(e as Error).message}`)
+
+        // Section critiques after page pass — shared budget, concurrent.
+        const sectionJobs: { page: (typeof targetsForCritique)[0]; sectionId: string }[] = []
+        for (const page of targetsForCritique) {
+          const targets = page.sections
+            .filter((s) => s.screenshot)
+            .sort((a, b) => b.rect.height - a.rect.height)
+            .slice(0, 3)
+          for (const s of targets) {
+            if (sectionJobs.length >= SECTION_BUDGET) break
+            sectionJobs.push({ page, sectionId: s.id })
           }
+          if (sectionJobs.length >= SECTION_BUDGET) break
         }
+
+        if (sectionJobs.length) {
+          progress('critique', 70, `Section critiques (${sectionJobs.length}, ×${CRITIQUE_CONCURRENCY})`)
+          const sectionFindings = await mapPool(
+            sectionJobs,
+            CRITIQUE_CONCURRENCY,
+            async (job) => {
+              checkpoint()
+              const s = job.page.sections.find((x) => x.id === job.sectionId)
+              if (!s) return []
+              const refs = run.references.filter((r) => r.sectionId === s.id)
+              try {
+                return await raceCancel(
+                  critiqueSectionAgainstReferences(critic, model, job.page, s, refs, cfg)
+                )
+              } catch (e) {
+                if (state.cancelled || (e as Error).name === 'CancelledError') throw new CancelledError()
+                log('warn', `section critique ${s.id}: ${(e as Error).message}`)
+                return []
+              }
+            },
+            { shouldStop: () => state.cancelled }
+          )
+          for (const batch of sectionFindings) run.findings.push(...batch)
+        }
+      } catch (e) {
+        if ((e as Error).message === 'cancelled' || (e as Error).name === 'CancelledError') {
+          throw new CancelledError()
+        }
+        throw e
       }
+
       progress('critique', 74, `${run.findings.filter((f) => f.source === 'ai').length} AI finding(s)`)
       await saveRun(run)
     } else if (cfg.useGemini) {
@@ -520,23 +646,39 @@ export async function executeRun(
     if (cfg.useShadcn) {
       progress('components', 78, 'Matching weak/repeated sections to Shoogle + shadcn')
       let skippedMature = 0
+      const picks: ReturnType<typeof pickSectionsForRecommendations> = []
       for (const page of run.pages) {
-        checkpoint()
-        const picks = pickSectionsForRecommendations(page.url, page.sections, run.findings, 6)
-        skippedMature += Math.max(0, page.sections.length - picks.length)
-        for (const pick of picks) {
-          checkpoint()
-          try {
-            const rec = await raceCancel(
-              recommendForSection(pick.section, pick.problems, settings.extraRegistries, true)
-            )
-            rec.reason = `[${pick.reasons.join(', ')}] ${rec.reason}`
-            run.recommendations.push(rec)
-          } catch (e) {
-            if (state.cancelled) throw new CancelledError()
-            log('warn', `registry (${pick.section.role}): ${(e as Error).message}`)
-          }
+        const pagePicks = pickSectionsForRecommendations(page.url, page.sections, run.findings, 6)
+        skippedMature += Math.max(0, page.sections.length - pagePicks.length)
+        picks.push(...pagePicks)
+      }
+      const REGISTRY_CONCURRENCY = 3
+      try {
+        const recs = await mapPool(
+          picks,
+          REGISTRY_CONCURRENCY,
+          async (pick) => {
+            checkpoint()
+            try {
+              const rec = await raceCancel(
+                recommendForSection(pick.section, pick.problems, settings.extraRegistries, true)
+              )
+              rec.reason = `[${pick.reasons.join(', ')}] ${rec.reason}`
+              return rec
+            } catch (e) {
+              if (state.cancelled || (e as Error).name === 'CancelledError') throw new CancelledError()
+              log('warn', `registry (${pick.section.role}): ${(e as Error).message}`)
+              return null
+            }
+          },
+          { shouldStop: () => state.cancelled }
+        )
+        for (const rec of recs) if (rec) run.recommendations.push(rec)
+      } catch (e) {
+        if ((e as Error).message === 'cancelled' || (e as Error).name === 'CancelledError') {
+          throw new CancelledError()
         }
+        throw e
       }
       const shoogleBacked = run.recommendations.filter((r) => r.source !== 'shadcn').length
       if (skippedMature > 0) {

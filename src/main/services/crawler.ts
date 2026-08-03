@@ -6,7 +6,7 @@
 import { chromium, type Browser, type Page } from 'playwright'
 import AxeBuilder from '@axe-core/playwright'
 import { join } from 'node:path'
-import { extractFn, observerInit } from './extract.js'
+import { extractFn, observerInit, responsiveOnlyFn } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
 import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
@@ -248,16 +248,28 @@ export async function capturePage(
       await page.screenshot({ path: shot, fullPage: true, animations: 'disabled' })
       screenshots[vp.name] = shot
 
-      const data = await page.evaluate(extractFn)
-      responsive.push({
-        viewport: vp.name,
-        horizontalOverflowPx: data.responsive.horizontalOverflowPx,
-        tinyTextCount: data.responsive.tinyTextCount,
-        smallTapTargets: data.responsive.smallTapTargets,
-        overlaps: data.responsive.overlaps
-      })
+      const isPrimary = vp.name === opts.viewports[0].name
 
-      if (vp.name === opts.viewports[0].name) {
+      if (!isPrimary) {
+        // Light pass: responsive metrics only — axe/CSS/sections stay on desktop.
+        const light = await page.evaluate(responsiveOnlyFn)
+        responsive.push({
+          viewport: vp.name,
+          horizontalOverflowPx: light.horizontalOverflowPx,
+          tinyTextCount: light.tinyTextCount,
+          smallTapTargets: light.smallTapTargets,
+          overlaps: light.overlaps
+        })
+      } else {
+        const data = await page.evaluate(extractFn)
+        responsive.push({
+          viewport: vp.name,
+          horizontalOverflowPx: data.responsive.horizontalOverflowPx,
+          tinyTextCount: data.responsive.tinyTextCount,
+          smallTapTargets: data.responsive.smallTapTargets,
+          overlaps: data.responsive.overlaps
+        })
+
         extracted = data
         sections = data.sections as PageSection[]
         // Per-section screenshots make the Gemini critique and the report concrete.
@@ -271,7 +283,7 @@ export async function capturePage(
             /* selector drifted; section still reported */
           }
         }
-        // Authored CSS: same-origin text came back per-sheet; fetch the rest.
+        // Authored CSS: same-origin text came back per-sheet; fetch the rest in parallel.
         try {
           const sheetInputs: CssSheetInput[] = Array.isArray(data.css?.sheets)
             ? data.css.sheets.map((s: { href?: string | null; text?: string }) => ({
@@ -284,17 +296,20 @@ export async function capturePage(
 
           let missedExternals = 0
           const externalList: string[] = data.css?.external ?? []
-          for (const href of externalList) {
-            try {
-              const res = await ctx.request.get(href, { timeout: 8000 })
-              if (res.ok()) {
-                sheetInputs.push({ href, text: await res.text() })
-              } else {
-                missedExternals++
+          const fetched = await Promise.all(
+            externalList.map(async (href) => {
+              try {
+                const res = await ctx.request.get(href, { timeout: 8000 })
+                if (res.ok()) return { href, text: await res.text(), ok: true as const }
+                return { href, ok: false as const }
+              } catch {
+                return { href, ok: false as const }
               }
-            } catch {
-              missedExternals++
-            }
+            })
+          )
+          for (const f of fetched) {
+            if (f.ok) sheetInputs.push({ href: f.href, text: f.text })
+            else missedExternals++
           }
           // Cap was applied in-page for listed externals; anything beyond still counts as missed.
           if (data.css?.missedExternalCap) missedExternals += Math.max(0, (data.css?.external?.length ?? 0) === 30 ? 1 : 0)
