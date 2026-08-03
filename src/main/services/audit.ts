@@ -198,6 +198,101 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
         'Move to a 4px (ideally 8px) rhythm. Off-grid spacing is why sections never quite align.')
     )
   }
+
+  /* ---- padding / margin / layout mismatches (DOM-measured) ---- */
+  const layout = (page.signals?.layout ?? null) as
+    | {
+        bandCount?: number
+        misalignedBands?: number
+        distinctBandGaps?: number
+        dominantGap?: number
+        offRhythmGaps?: number
+        asymmetricPadding?: number
+        siblingPaddingMismatches?: number
+        uniquePaddingValues?: number
+        uniqueMarginValues?: number
+      }
+    | null
+  if (layout) {
+    const bands = layout.bandCount ?? 0
+    if (bands >= 4 && (layout.misalignedBands ?? 0) >= 2) {
+      out.push(
+        mk(
+          page,
+          'craft',
+          'major',
+          `${layout.misalignedBands} content bands misaligned on the left edge`,
+          `Of ${bands} main-column bands, ${layout.misalignedBands} sit more than 8px off the median left edge. Stacked sections should share a content gutter.`,
+          'Align the main column with one horizontal padding token; stop per-section margin-left overrides.',
+          { effort: 'one-line', confidence: 'high' }
+        )
+      )
+    }
+    if ((layout.distinctBandGaps ?? 0) >= 4 && (layout.offRhythmGaps ?? 0) >= 3) {
+      out.push(
+        mk(
+          page,
+          'coherence',
+          'minor',
+          `Vertical rhythm uses ${layout.distinctBandGaps} different gaps between bands`,
+          `Dominant gap ~${layout.dominantGap ?? '?'}px but ${layout.offRhythmGaps} neighbouring pairs drift by >8px. Uneven section spacing reads as unfinished layout.`,
+          'Use one stack gap token (e.g. gap-4 / gap-6) between page bands; avoid ad-hoc margin-top per section.',
+          { effort: 'one-line', confidence: 'high' }
+        )
+      )
+    }
+    if ((layout.asymmetricPadding ?? 0) >= 4) {
+      out.push(
+        mk(
+          page,
+          'craft',
+          'minor',
+          `${layout.asymmetricPadding} cards/blocks with uneven padding`,
+          'Horizontal or vertical padding differs by ≥8px on the same component. Optical imbalance usually means one side was hand-tuned.',
+          'Set padding with a single token (p-3 / p-4) rather than independent padding-left/right values.',
+          { effort: 'one-line', confidence: 'low' }
+        )
+      )
+    }
+    if ((layout.siblingPaddingMismatches ?? 0) >= 3) {
+      out.push(
+        mk(
+          page,
+          'coherence',
+          'minor',
+          `Sibling cards disagree on padding (${layout.siblingPaddingMismatches} outliers)`,
+          'Items that share a parent row/list should share the same padding-left. Drift means components were restyled independently.',
+          'Extract a shared card/list-item primitive and forbid local padding overrides.',
+          { effort: 'component', confidence: 'high' }
+        )
+      )
+    }
+    if ((layout.uniquePaddingValues ?? 0) >= 12) {
+      out.push(
+        mk(
+          page,
+          'coherence',
+          'major',
+          `${layout.uniquePaddingValues} distinct padding values in the main column`,
+          `Plus ${layout.uniqueMarginValues ?? 0} distinct vertical margins. A spacing scale usually needs 4–6 steps, not a unique value per component.`,
+          'Collapse padding/margin onto the spacing scale (4/8/12/16/24/32) and delete one-off values.',
+          { effort: 'component', confidence: 'high' }
+        )
+      )
+    } else if ((layout.uniqueMarginValues ?? 0) >= 14) {
+      out.push(
+        mk(
+          page,
+          'coherence',
+          'minor',
+          `${layout.uniqueMarginValues} distinct margin values in the main column`,
+          'Margin sprawl between blocks breaks vertical rhythm even when padding looks disciplined.',
+          'Prefer gap on the parent flex/stack over per-child margin-top.',
+          { effort: 'one-line', confidence: 'high' }
+        )
+      )
+    }
+  }
   if (t.transitions.length > 5) {
     out.push(
       mk(page, 'coherence', 'nit',

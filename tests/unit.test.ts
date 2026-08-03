@@ -289,7 +289,8 @@ test('isDevChrome matches Agentation controlButton ancestry, not first-party CSS
 })
 
 test('classifyCssSheet separates CDN, framework and app CSS', async () => {
-  const { classifyCssSheet, partitionCssSheets, isFrameworkTokenName } = await import('../src/main/services/cssScope.js')
+  const { classifyCssSheet, partitionCssSheets, isFrameworkTokenName, contentLooksVendor } =
+    await import('../src/main/services/cssScope.js')
   assert.equal(
     classifyCssSheet(
       { href: 'https://cdn.jsdelivr.net/npm/bootstrap@5/dist/css/bootstrap.min.css', text: '.btn{}' },
@@ -303,6 +304,49 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
       'http://localhost:5181/'
     ).scope,
     'framework'
+  )
+  assert.equal(
+    classifyCssSheet(
+      {
+        href: '/Users/me/app/node_modules/.pnpm/sonner@1/node_modules/sonner/dist/styles.css',
+        text: '[data-sonner-toaster]{z-index:999999999}'
+      },
+      'http://localhost:5181/'
+    ).scope,
+    'vendor',
+    'sonner in node_modules must not grade as first-party'
+  )
+  assert.equal(
+    classifyCssSheet(
+      {
+        href: null,
+        text: '[data-sonner-toaster]{position:fixed;z-index:999999999}[data-sonner-toast]{opacity:1}'.repeat(3)
+      },
+      'http://localhost:5181/'
+    ).scope,
+    'vendor',
+    'runtime-injected sonner CSS (no href) is still vendor'
+  )
+  assert.equal(
+    classifyCssSheet(
+      {
+        href: 'style:#feedback-tool-styles-page-toolbar-css-styles',
+        text: '.styles-module__toolbar___x{z-index:100000}.styles-module__markersLayer___y{}'
+      },
+      'http://localhost:5181/'
+    ).scope,
+    'vendor'
+  )
+  assert.equal(
+    classifyCssSheet(
+      {
+        href: '/Users/me/app/src/styles/astryx.css',
+        text: '/*! fake */ :root{--tw-shadow:0}.card{color:red}' + '--tw-a:1;'.repeat(20)
+      },
+      'http://localhost:5181/'
+    ).scope,
+    'app',
+    'authored /src sheets stay app even when they embed Tailwind'
   )
   assert.equal(
     classifyCssSheet(
@@ -321,6 +365,7 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
     ).scope,
     'app'
   )
+  assert.equal(contentLooksVendor('[data-sonner-toaster]{z-index:9}'), true)
 
   const part = partitionCssSheets(
     [
@@ -334,6 +379,10 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
       {
         href: 'https://unpkg.com/normalize.css',
         text: '/*! normalize.css */ html{line-height:1.15} body{margin:0}' + 'a{color:red}'.repeat(20)
+      },
+      {
+        href: null,
+        text: '[data-sonner-toaster]{z-index:999999999}' + '.x{color:red}'.repeat(30)
       }
     ],
     'http://localhost:5181/'
@@ -343,6 +392,7 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
   assert.ok(part.bytes.vendor > 0)
   assert.ok(part.analysis.includes('--color-brand'))
   assert.ok(!part.analysis.includes('normalize.css'))
+  assert.ok(!part.analysis.includes('999999999'), 'sonner z-index must not enter first-party analysis')
 
   // Thin first-party: prefer app+framework over vendor CDN resets.
   const thin = partitionCssSheets(
@@ -355,6 +405,10 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
       {
         href: 'https://unpkg.com/normalize.css',
         text: '/*! normalize.css */ html{line-height:1.15}' + 'a{color:red}'.repeat(30)
+      },
+      {
+        href: '/Users/x/proj/node_modules/sonner/dist/styles.css',
+        text: '[data-sonner-toaster]{z-index:999999999}' + '.t{opacity:1}'.repeat(20)
       }
     ],
     'http://localhost:5181/'
@@ -363,6 +417,7 @@ test('classifyCssSheet separates CDN, framework and app CSS', async () => {
   assert.ok(thin.analysis.includes('--brand'))
   assert.ok(thin.analysis.includes('tailwind') || thin.analysis.includes('.flex'))
   assert.ok(!thin.analysis.includes('normalize.css'))
+  assert.ok(!thin.analysis.includes('999999999'))
 
   assert.equal(isFrameworkTokenName('tw-shadow'), true)
   assert.equal(isFrameworkTokenName('color-brand'), false)
@@ -1478,6 +1533,89 @@ test('validateFlow records readonly email fills as refused, not invalid', () => 
   )
   assert.equal(bad.invalid, undefined)
   assert.ok(bad.refusedFills?.length)
+})
+
+test('validateFlow strips text= prefix on assertText so AI flows stay runnable', () => {
+  const p = page({
+    url: 'http://localhost:5181/',
+    title: 'Home',
+    controls: [
+      {
+        tag: 'a',
+        type: '',
+        role: 'link',
+        name: '',
+        text: 'Tasks',
+        ariaLabel: '',
+        placeholder: '',
+        href: '/tasks',
+        selector: 'a',
+        disabled: false,
+        editable: false
+      }
+    ],
+    sections: [
+      {
+        id: 's1',
+        role: 'nav',
+        roleConfidence: 1,
+        label: 'nav',
+        selector: 'nav',
+        rect: { x: 0, y: 0, width: 200, height: 400 },
+        textPreview: 'Tasks Review Alerts',
+        headings: ['Overview'],
+        ctaLabels: ['Tasks', 'Review'],
+        components: [],
+        stats: {
+          interactiveCount: 3,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 1,
+          maxTextWidthPx: 200
+        }
+      }
+    ]
+  })
+  const v = validateFlow(
+    {
+      name: 'Go tasks',
+      steps: [
+        { action: 'goto', target: '/' },
+        { action: 'click', target: 'text=Tasks' },
+        { action: 'assertText', value: 'text=tasks' }
+      ]
+    },
+    [p]
+  )
+  assert.equal(v.invalid, undefined, v.invalid)
+  const assertStep = v.steps.find((s) => s.action === 'assertText')
+  assert.equal(assertStep?.value, 'tasks')
+})
+
+test('auditPage flags padding and layout mismatches from signals', () => {
+  const p = page({
+    url: 'https://example.com/app',
+    title: 'App',
+    signals: {
+      layout: {
+        bandCount: 6,
+        misalignedBands: 3,
+        distinctBandGaps: 5,
+        dominantGap: 24,
+        offRhythmGaps: 4,
+        asymmetricPadding: 5,
+        siblingPaddingMismatches: 4,
+        uniquePaddingValues: 14,
+        uniqueMarginValues: 8
+      }
+    }
+  })
+  const findings = auditPage(p, config)
+  assert.ok(findings.some((f) => /misaligned on the left edge/i.test(f.title)))
+  assert.ok(findings.some((f) => /different gaps between bands/i.test(f.title)))
+  assert.ok(findings.some((f) => /uneven padding/i.test(f.title)))
+  assert.ok(findings.some((f) => /distinct padding values/i.test(f.title)))
 })
 
 test('partitionProductFindings excludes Agentation selectors from product grade', async () => {

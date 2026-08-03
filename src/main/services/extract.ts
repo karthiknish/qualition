@@ -696,7 +696,13 @@ export const extractFn = function (): any {
         truncated = true
       }
       cssBytes += chunk.length
-      sheetsOut.push({ href: sheet.href ?? null, text: chunk })
+      // Vite injects CSS as <style data-vite-dev-id="/…/node_modules/sonner/…">
+      // with sheet.href === null. Without that id, every package sheet looks
+      // first-party and sonner's z-index:999999999 grades the product.
+      const owner = (sheet as CSSStyleSheet).ownerNode as Element | null
+      const viteId = owner?.getAttribute?.('data-vite-dev-id')
+      const styleId = owner?.id ? `style:#${owner.id}` : null
+      sheetsOut.push({ href: sheet.href ?? viteId ?? styleId, text: chunk })
     } catch {
       if (sheet.href) externalSheets.push(sheet.href)
     }
@@ -724,6 +730,119 @@ export const extractFn = function (): any {
       longTaskMs: (window as any).__q_longtask ?? 0
     }
   })()
+
+  /* --------------------- padding / margin / layout ---------------------- */
+  // App-shell content column only — nav chrome would drown the signal.
+  const layoutRoot =
+    document.querySelector('main, [role=main], [class*=layout-content]') || document.body
+  const layoutKids = flatChildren(layoutRoot)
+    .filter((el) => isVisible(el) && hasSubstance(el))
+    .filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.height > 40 && r.width > 80
+    })
+    .slice(0, 40)
+
+  const leftEdges = layoutKids.map((el) => Math.round(el.getBoundingClientRect().left))
+  const medianLeft = (() => {
+    if (!leftEdges.length) return 0
+    const s = [...leftEdges].sort((a, b) => a - b)
+    return s[Math.floor(s.length / 2)]
+  })()
+  const misalignedBands = leftEdges.filter((l) => Math.abs(l - medianLeft) > 8).length
+
+  // Vertical rhythm between consecutive bands (external margin / gap).
+  const bandGaps: number[] = []
+  for (let i = 1; i < layoutKids.length; i++) {
+    const prev = layoutKids[i - 1].getBoundingClientRect()
+    const cur = layoutKids[i].getBoundingClientRect()
+    const g = Math.round(cur.top - prev.bottom)
+    if (g > 0 && g < 240) bandGaps.push(g)
+  }
+  const gapBuckets = new Map<number, number>()
+  for (const g of bandGaps) {
+    const bucket = Math.round(g / 4) * 4
+    gapBuckets.set(bucket, (gapBuckets.get(bucket) ?? 0) + 1)
+  }
+  const distinctBandGaps = gapBuckets.size
+  const dominantGap = [...gapBuckets.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 0
+  const offRhythmGaps = bandGaps.filter((g) => dominantGap && Math.abs(g - dominantGap) > 8).length
+
+  // Card-like boxes: asymmetric horizontal padding, sibling padding drift.
+  let asymmetricPadding = 0
+  let siblingPaddingMismatches = 0
+  const cardLike = Array.from(
+    (layoutRoot as Element).querySelectorAll('article, [class*=card], [role=listitem], li, section')
+  )
+    .filter((el) => isVisible(el) && !isDevChrome(el))
+    .filter((el) => {
+      const r = el.getBoundingClientRect()
+      return r.width > 120 && r.width < 720 && r.height > 48 && r.height < 480
+    })
+    .slice(0, 80)
+
+  for (const el of cardLike) {
+    const cs = getComputedStyle(el)
+    const pl = parseFloat(cs.paddingLeft) || 0
+    const pr = parseFloat(cs.paddingRight) || 0
+    const pt = parseFloat(cs.paddingTop) || 0
+    const pb = parseFloat(cs.paddingBottom) || 0
+    if (Math.min(pl, pr, pt, pb) >= 4 && (Math.abs(pl - pr) >= 8 || Math.abs(pt - pb) >= 12)) {
+      asymmetricPadding++
+    }
+  }
+
+  // Sibling groups that share a parent: padding-left should match.
+  const parents = new Map<Element, Element[]>()
+  for (const el of cardLike) {
+    const p = el.parentElement
+    if (!p) continue
+    const list = parents.get(p) ?? []
+    list.push(el)
+    parents.set(p, list)
+  }
+  for (const sibs of parents.values()) {
+    if (sibs.length < 3) continue
+    const pads = sibs.map((el) => {
+      const cs = getComputedStyle(el)
+      return Math.round(parseFloat(cs.paddingLeft) || 0)
+    })
+    const mode = [...pads.reduce((m, v) => m.set(v, (m.get(v) ?? 0) + 1), new Map<number, number>()).entries()].sort(
+      (a, b) => b[1] - a[1]
+    )[0]?.[0]
+    if (mode == null) continue
+    const drift = pads.filter((p) => Math.abs(p - mode) >= 8).length
+    if (drift >= 2) siblingPaddingMismatches += drift
+  }
+
+  // Unique padding/margin values in the content column (sprawl).
+  const padValues = new Set<number>()
+  const marginValues = new Set<number>()
+  for (const el of Array.from((layoutRoot as Element).querySelectorAll('*'))
+    .filter((el) => isVisible(el) && !isDevChrome(el))
+    .slice(0, 600)) {
+    const cs = getComputedStyle(el)
+    for (const p of ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'] as const) {
+      const v = Math.round(parseFloat(cs[p]) || 0)
+      if (v > 0 && v < 200) padValues.add(v)
+    }
+    for (const p of ['marginTop', 'marginBottom'] as const) {
+      const v = Math.round(parseFloat(cs[p]) || 0)
+      if (v > 0 && v < 200) marginValues.add(v)
+    }
+  }
+
+  const layout = {
+    bandCount: layoutKids.length,
+    misalignedBands,
+    distinctBandGaps,
+    dominantGap,
+    offRhythmGaps,
+    asymmetricPadding,
+    siblingPaddingMismatches,
+    uniquePaddingValues: padValues.size,
+    uniqueMarginValues: marginValues.size
+  }
 
   return {
     title: document.title,
@@ -759,6 +878,7 @@ export const extractFn = function (): any {
       hasSkipLink: !!document.querySelector(
         'a[href^="#"][class*=skip i], a[href="#main"], a[href="#content"], a.skip-to-content, a[href="#app"]'
       ),
+      layout,
       // Must skip Agentation / Vercel toolbar / etc. — they stay in the DOM
       // after hideDevChrome (display:none) and would otherwise inflate this
       // count into a false "icon-only buttons" finding on every page.

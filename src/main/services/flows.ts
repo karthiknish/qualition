@@ -178,14 +178,22 @@ export function validateFlow(
     }
 
     if (step.action === 'assertText') {
-      const needle = norm(step.value ?? step.target ?? '')
+      // Models often emit assertText value="text=Tasks" (Playwright click syntax).
+      // Strip the prefix so we match the crawl corpus ("tasks"), not the literal "text=tasks".
+      const raw = String(step.value ?? step.target ?? '')
+      const needle = norm(raw.replace(/^(text|label|placeholder|role)=/i, ''))
       if (!needle) {
         problems.push('assertText step has no text to assert')
         continue
       }
       const seen = allText.some((t) => t.includes(needle)) || [...allHandles].some((h) => h.includes(needle))
       if (!seen) problems.push(`text "${needle}" was never seen on any crawled page`)
-      else cleanedSteps.push({ ...step, intent: step.intent ?? `Confirm “${needle}” is visible` })
+      else
+        cleanedSteps.push({
+          ...step,
+          value: needle,
+          intent: step.intent ?? `Confirm “${needle}” is visible`
+        })
       continue
     }
 

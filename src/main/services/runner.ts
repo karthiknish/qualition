@@ -567,7 +567,6 @@ export async function executeRun(
 
     // Nothing runs against targets the crawl never saw.
     const validated = validateFlows(flows, run.pages)
-    const runnable = validated.filter((f) => !f.invalid)
     const rejected = validated.filter((f) => f.invalid)
     for (const f of rejected) {
       log('warn', `flow "${f.name}" not run — ${f.invalid}`)
@@ -583,6 +582,21 @@ export async function executeRun(
         pageUrl: cfg.targetUrl,
         source: 'ai'
       })
+    }
+    // AI proposals that all fail validation must not skip the flow phase —
+    // fall back to crawl-derived journeys so the product still gets exercised.
+    let runnable = validated.filter((f) => !f.invalid)
+    if (runnable.length === 0 && flowOrigin === 'ai') {
+      const derived = heuristicFlows(run.pages)
+      const derivedValidated = validateFlows(derived, run.pages)
+      runnable = derivedValidated.filter((f) => !f.invalid)
+      if (runnable.length) {
+        flowOrigin = 'derived'
+        log(
+          'info',
+          `All ${rejected.length} AI flow(s) were invalid — falling back to ${runnable.length} crawl-derived flow(s)`
+        )
+      }
     }
     if (runnable.length === 0) {
       log('info', 'No runnable flows for this product — skipping the flow phase.')
