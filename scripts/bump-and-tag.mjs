@@ -2,11 +2,11 @@
 /**
  * Ensure package.json has a version that is tagged for release.
  *
- * - If v$version already exists → patch-bump + commit
- * - If v$version is missing → tag the current version (already bumped in-commit)
+ * - While v$version exists → patch-bump until free
+ * - If v$version is missing → tag the current version
  *
  * Env:
- *   GIT_PUSH=1     push commit + tag to origin
+ *   GIT_PUSH=1     push the release tag to origin (not main — branch protection)
  *   DRY_RUN=1      print actions only
  *
  * Skip when the triggering commit message contains [skip-release].
@@ -54,6 +54,15 @@ function readVersion() {
   return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version
 }
 
+function bumpPatch(version) {
+  const parts = version.split('.').map((n) => Number(n))
+  if (parts.length !== 3 || parts.some((n) => !Number.isFinite(n))) {
+    throw new Error(`expected semver x.y.z, got ${version}`)
+  }
+  parts[2] += 1
+  return parts.join('.')
+}
+
 const msg = shOut('git log -1 --pretty=%B')
 if (/\[skip-release\]/i.test(msg)) {
   console.log('skip-release in commit message — nothing to do')
@@ -62,29 +71,32 @@ if (/\[skip-release\]/i.test(msg)) {
 
 let version = readVersion()
 let didBump = false
+let guard = 0
 
-if (tagExists(`v${version}`)) {
-  const nextHint = version.replace(/(\d+)$/, (_, n) => String(Number(n) + 1))
-  console.log(`tag v${version} already exists → npm version patch (${version} → ~${nextHint})`)
+while (tagExists(`v${version}`)) {
+  if (++guard > 50) throw new Error('could not find a free patch version')
+  const next = bumpPatch(version)
+  console.log(`tag v${version} already exists → bump ${version} → ${next}`)
   if (!dry) {
     sh('npm version patch --no-git-tag-version')
     version = readVersion()
-    didBump = true
   } else {
-    version = nextHint
-    didBump = true
+    version = next
   }
-} else {
-  console.log(`no tag for v${version} — will tag current version`)
+  didBump = true
 }
+
+if (!didBump) console.log(`no tag for v${version} — will tag current version`)
 
 const tag = `v${version}`
 writeFileSync(join(root, '.release-version'), `${version}\n`)
+writeFileSync(join(root, '.release-bumped'), didBump ? 'true\n' : 'false\n')
 
 if (dry) {
-  console.log(`DRY_RUN: would ${didBump ? 'commit + ' : ''}tag ${tag}${doPush ? ' and push' : ''}`)
+  console.log(`DRY_RUN: would ${didBump ? 'commit + ' : ''}tag ${tag}${doPush ? ' and push tag' : ''}`)
   console.log(`VERSION=${version}`)
   console.log(`TAG=${tag}`)
+  console.log(`BUMPED=${didBump}`)
   process.exit(0)
 }
 
@@ -106,10 +118,12 @@ if (!tagExists(tag)) {
 }
 
 if (doPush) {
-  sh('git push origin HEAD:main')
+  // Never push to main here — protected branches reject GITHUB_TOKEN without
+  // the required status check. Tags are enough for GitHub Releases.
   sh(`git push origin ${tag}`)
-  console.log(`pushed HEAD and ${tag}`)
+  console.log(`pushed ${tag}`)
 }
 
 console.log(`VERSION=${version}`)
 console.log(`TAG=${tag}`)
+console.log(`BUMPED=${didBump}`)
