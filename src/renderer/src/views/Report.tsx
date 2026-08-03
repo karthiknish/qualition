@@ -328,6 +328,34 @@ function Overview({ run }: { run: Run }): JSX.Element {
 
   return (
     <div className="grid grid-cols-3 gap-4">
+      {(run.buildMode === 'development' || run.excludedFindings?.length) && (
+        <Panel className="col-span-3 border-amber-900/50 bg-amber-950/20" title="Capture honesty">
+          <div className="space-y-1 text-[12px] text-amber-100/90">
+            {run.buildMode === 'development' && (
+              <p>
+                Audited a <span className="font-medium text-amber-50">development</span> build
+                {run.pages[0]?.captureContext?.buildHints?.length
+                  ? ` (${run.pages[0].captureContext.buildHints.join(', ')})`
+                  : ''}
+                . Perf/CSS weight findings are softened — re-audit production for shipping numbers.
+              </p>
+            )}
+            {!!run.excludedFindings?.length && (
+              <p>
+                {run.excludedFindings.length} finding(s) excluded as not first-party / may not ship (dev chrome,
+                vendor). See craft nits for the summary.
+              </p>
+            )}
+            {run.comparedToRunId && (
+              <p className="text-zinc-400">
+                Diffed against prior run <code className="text-zinc-300">{run.comparedToRunId}</code>
+                {' · '}
+                {run.findings.filter((f) => f.delta === 'new').length} new
+              </p>
+            )}
+          </div>
+        </Panel>
+      )}
       <Panel className="col-span-1" title="Score">
         {s ? (
           <div>
@@ -594,21 +622,55 @@ function Flows({ run }: { run: Run }): JSX.Element {
               against the score.
             </p>
           )}
+          {f.startingState && (
+            <p className="mb-2 text-[11px] text-zinc-500">
+              Starting state:{' '}
+              {f.startingState.signedInAs ? `signed in as ${f.startingState.signedInAs}` : 'anonymous'}
+              {f.startingState.seededDataNote ? ` · ${f.startingState.seededDataNote}` : ''}
+            </p>
+          )}
           <ol className="space-y-2">
             {f.steps.map((s, i) => (
               <li key={i} className="flex items-start gap-3">
                 <span
                   className={cx(
                     'mt-1 h-2 w-2 shrink-0 rounded-full',
-                    s.ok ? 'bg-emerald-400' : s.skipped ? 'bg-zinc-600' : 'bg-red-400'
+                    s.outcome === 'refused'
+                      ? 'bg-amber-400'
+                      : s.ok
+                        ? 'bg-emerald-400'
+                        : s.skipped
+                          ? 'bg-zinc-600'
+                          : 'bg-red-400'
                   )}
                 />
                 <div className="min-w-0 flex-1">
-                  <div className="font-mono text-[12px] text-zinc-300">
-                    {s.step.action} {s.step.target ?? ''} {s.step.value ? `| ${s.step.value}` : ''}
+                  <div className="text-[12px] text-zinc-200">
+                    {s.step.intent ?? (
+                      <span className="font-mono text-zinc-300">
+                        {s.step.action} {s.step.target ?? ''} {s.step.value ? `| ${s.step.value}` : ''}
+                      </span>
+                    )}
+                    {s.outcome && (
+                      <Badge className="ml-2 border-zinc-700 bg-zinc-900 text-zinc-500">{s.outcome}</Badge>
+                    )}
                     <span className="ml-2 text-[11px] text-zinc-600">{s.ms}ms</span>
                   </div>
-                  {s.error && <div className="text-[11px] text-red-400">{s.error}</div>}
+                  {s.step.intent && (
+                    <div className="font-mono text-[10px] text-zinc-600">
+                      {s.step.action} {s.step.target ?? ''}
+                    </div>
+                  )}
+                  {s.error && (
+                    <div className={cx('text-[11px]', s.outcome === 'refused' ? 'text-amber-400/90' : 'text-red-400')}>
+                      {s.error}
+                    </div>
+                  )}
+                  {s.domSnapshot && (
+                    <pre className="mt-1 max-h-20 overflow-auto rounded border border-zinc-800 bg-zinc-950/80 p-1.5 text-[9px] text-zinc-500">
+                      {s.domSnapshot}
+                    </pre>
+                  )}
                 </div>
                 {s.screenshot && (
                   <img src={api.asset(s.screenshot)} alt="" className="h-16 w-28 rounded border border-zinc-800 object-cover object-top" />
@@ -1311,7 +1373,19 @@ function FindingCard({ f }: { f: Finding }): JSX.Element {
       <div className="flex flex-wrap items-center gap-2">
         <Badge className={SEVERITY_COLOR[f.severity]}>{f.severity}</Badge>
         <Badge>{f.category}</Badge>
-        <Badge className="border-zinc-800 bg-zinc-900 text-zinc-500">{f.source}</Badge>
+        <Badge className="border-zinc-800 bg-zinc-900 text-zinc-500">
+          {f.source === 'ai' ? 'review' : 'measured'}
+        </Badge>
+        {f.provenance?.ownership && f.provenance.ownership !== 'first-party' && (
+          <Badge className="border-amber-900/60 bg-amber-950/40 text-amber-200/90">{f.provenance.ownership}</Badge>
+        )}
+        {f.provenance?.shipsInProduction === false && (
+          <Badge className="border-violet-900/50 bg-violet-950/40 text-violet-200/90">does not ship</Badge>
+        )}
+        {f.effort && <Badge className="border-zinc-800 bg-zinc-950 text-zinc-500">{f.effort}</Badge>}
+        {f.delta && f.delta !== 'unchanged' && (
+          <Badge className="border-sky-900/50 bg-sky-950/40 text-sky-200/90">{f.delta}</Badge>
+        )}
         <span className="text-[13px] font-medium text-zinc-100">{f.title}</span>
       </div>
       <p className="mt-1.5 whitespace-pre-wrap text-[12px] leading-relaxed text-zinc-400">{f.detail}</p>
@@ -1321,6 +1395,13 @@ function FindingCard({ f }: { f: Finding }): JSX.Element {
         {f.sectionId && <span>· section {f.sectionId}</span>}
         {f.viewport && <span>· {f.viewport}</span>}
         {f.selector && <code className="truncate">· {f.selector}</code>}
+        {f.provenance?.sourceFile && (
+          <span>
+            · {f.provenance.sourceFile}
+            {f.provenance.sourceLine ? `:${f.provenance.sourceLine}` : ''}
+          </span>
+        )}
+        {f.affectedPages && f.affectedPages > 1 && <span>· {f.affectedPages} pages</span>}
       </div>
     </div>
   )

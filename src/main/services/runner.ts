@@ -4,8 +4,8 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { Browser } from 'playwright'
-import { crawl, launch, runFlow, DEFAULT_VIEWPORTS } from './crawler.js'
-import { auditPage, dedupeFindings, scoreRun, themeSummary } from './audit.js'
+import { capturePage, crawl, launch, runFlow, DEFAULT_VIEWPORTS } from './crawler.js'
+import { auditPage, dedupeFindings, diffFindingsAgainstPrior, fixedFindingsSincePrior, scoreRun, themeSummary } from './audit.js'
 import { critiquePage, critiqueSectionAgainstReferences, finalVerdict, makeCritic, proposeFlows } from './critic.js'
 import { credsFromSettings } from './providers.js'
 import { probeInteractions } from './interaction.js'
@@ -23,6 +23,7 @@ import { runLighthouse } from './lighthouse.js'
 import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
+import { applyProductionPresence, partitionProductFindings } from './provenance.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
 
 type Emit = (p: RunProgress) => void
@@ -573,28 +574,120 @@ export async function executeRun(
       progress('flows', 86, `Replaying flow ${i + 1}/${Math.min(runnable.length, flowBudget)}: "${flow.name}"`)
       try {
         const result = await raceCancel(
-          runFlow(browser, cfg.targetUrl, { ...flow, origin: flowOrigin }, assets, storageState)
+          runFlow(
+            browser,
+            cfg.targetUrl,
+            {
+              ...flow,
+              origin: flowOrigin,
+              refusedFills: flow.refusedFills,
+              startingState: {
+                signedInAs: cfg.auth?.username,
+                storageStateId: storageState,
+                seededDataNote: storageState ? 'signed-in storageState' : 'anonymous'
+              }
+            },
+            assets,
+            storageState
+          )
         )
         run.flows.push(result)
         if (!result.ok) {
           const failed = result.steps.find((s) => !s.ok)
-          // Every target here was verified to exist before the run, so a
-          // failure now really is the product misbehaving.
+          const outcome = failed?.outcome ?? 'error'
+          const sev =
+            outcome === 'refused' ? ('nit' as const) : outcome === 'absent' ? ('major' as const) : ('critical' as const)
           run.findings.push({
             id: `flow-${run.flows.length}`,
             category: 'flow',
-            severity: 'critical',
-            title: `Flow "${flow.name}" broke at step ${result.steps.filter((s) => s.ok).length + 1} of ${result.steps.length}`,
-            detail: `${failed?.step.action} ${failed?.step.target ?? ''} — ${failed?.error ?? 'unknown error'}\nThe target existed during the crawl, so the journey stops working somewhere after the preceding step.`,
-            fix: 'Confirm by hand before changing code: open the page, perform this step and watch what happens. If the control responds normally to a human, treat this as a flaky selector rather than a product defect — timeouts on elements that resolved but never became clickable are usually a wrapper/overlay issue, not a dead end.',
+            severity: sev,
+            title: `Flow "${flow.name}" ${outcome === 'refused' ? 'hit a refused control' : 'broke'} at step ${result.steps.filter((s) => s.ok).length + 1} of ${result.steps.length}`,
+            detail: `${failed?.step.intent ?? failed?.step.action} ${failed?.step.target ?? ''} — ${failed?.error ?? 'unknown error'} (outcome=${outcome})\nStarting state: ${JSON.stringify(result.startingState ?? {})}\nThe target existed during the crawl, so the journey stops working somewhere after the preceding step.`,
+            fix:
+              outcome === 'refused'
+                ? 'No product change — the control correctly refuses (readonly/disabled). Update the flow to skip this field or use an editable one.'
+                : 'Confirm by hand before changing code: open the page, perform this step and watch what happens. If the control responds normally to a human, treat this as a flaky selector rather than a product defect — timeouts on elements that resolved but never became clickable are usually a wrapper/overlay issue, not a dead end.',
             pageUrl: cfg.targetUrl,
             evidence: failed?.screenshot ? [failed.screenshot] : undefined,
-            source: 'heuristic'
+            source: 'heuristic',
+            effort: outcome === 'refused' ? 'one-line' : 'component',
+            confidence: 'high'
           })
+        } else if (result.steps.some((s) => s.outcome === 'refused')) {
+          log(
+            'info',
+            `flow "${flow.name}" passed with ${result.steps.filter((s) => s.outcome === 'refused').length} correctly refused fill(s)`
+          )
         }
       } catch (e) {
         if (state.cancelled) throw new CancelledError()
         log('error', `flow "${flow.name}" crashed: ${(e as Error).message}`)
+      }
+    }
+
+    /* 6b. optional production URL — lightweight presence + CSS-bytes compare */
+    if (cfg.productionUrl && cfg.productionUrl.replace(/\/$/, '') !== cfg.targetUrl.replace(/\/$/, '')) {
+      checkpoint()
+      progress('prod-pass', 92, `Comparing against production ${cfg.productionUrl}`)
+      try {
+        const desktop = (cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS).find((v) => !v.isMobile) ??
+          DEFAULT_VIEWPORTS[0]
+        const prodPage = await raceCancel(
+          capturePage(browser, cfg.productionUrl, {
+            viewports: [desktop],
+            outDir: assets,
+            onLog: (m) => log('info', m)
+          })
+        )
+        const sels = [...new Set(run.findings.map((f) => f.selector).filter((s): s is string => !!s))].slice(0, 200)
+        const presence: Record<string, boolean> = {}
+        if (sels.length) {
+          const ctx = await browser.newContext({
+            viewport: { width: desktop.width, height: desktop.height },
+            bypassCSP: true
+          })
+          const page = await ctx.newPage()
+          try {
+            await page.goto(prodPage.url || cfg.productionUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+            await page.waitForTimeout(800)
+            const found = await page.evaluate((list: string[]) => {
+              const out: Record<string, boolean> = {}
+              for (const s of list) {
+                try {
+                  out[s] = !!document.querySelector(s)
+                } catch {
+                  out[s] = false
+                }
+              }
+              return out
+            }, sels)
+            Object.assign(presence, found)
+          } finally {
+            await ctx.close().catch(() => {})
+          }
+        }
+        const auditCssBytes = run.pages.reduce(
+          (n, p) => n + (p.cssStats?.attribution?.totalBytes ?? p.cssStats?.bytes ?? 0),
+          0
+        )
+        const prodCssBytes = prodPage.cssStats?.attribution?.totalBytes ?? prodPage.cssStats?.bytes ?? 0
+        run.findings = applyProductionPresence(run.findings, presence, {
+          prodCssBytes: prodCssBytes || undefined,
+          auditCssBytes: auditCssBytes || undefined,
+          productionUrl: cfg.productionUrl
+        })
+        const absent = Object.values(presence).filter((v) => !v).length
+        log(
+          'info',
+          `Production pass: ${sels.length - absent}/${sels.length} selectors present; CSS ${prodCssBytes}B vs audit ${auditCssBytes}B`
+        )
+        if (prodPage.axe?.length) {
+          // Lightweight a11y signal only — do not merge axe defects (different origin).
+          log('info', `Production page reported ${prodPage.axe.length} axe violation(s) (informational; not graded)`)
+        }
+      } catch (e) {
+        if (state.cancelled) throw new CancelledError()
+        log('warn', `Production URL pass failed: ${(e as Error).message}`)
       }
     }
 
@@ -607,6 +700,39 @@ export async function executeRun(
     if (beforeDedupe !== run.findings.length) {
       log('info', `Merged ${beforeDedupe - run.findings.length} repeated finding(s) reported on multiple pages`)
     }
+    // Drop Agentation / vendor chrome from the product grade; keep an explanatory nit.
+    const parted = partitionProductFindings(run.findings, cfg.targetUrl)
+    run.excludedFindings = parted.excluded
+    run.findings = parted.meta ? [...parted.product, parted.meta] : parted.product
+    if (parted.excluded.length) {
+      log('info', `Excluded ${parted.excluded.length} non-first-party finding(s) from the product grade`)
+    }
+
+    // Build-mode banner on the run.
+    const modes = run.pages.map((p) => p.captureContext?.buildMode).filter(Boolean)
+    run.buildMode =
+      modes.includes('development') ? 'development' : modes.includes('production') ? 'production' : 'unknown'
+
+    // Per-finding delta vs prior done run for this target.
+    try {
+      const prior = (await listRuns())
+        .filter((r) => r.status === 'done' && r.id !== run.id && r.config.targetUrl === cfg.targetUrl)
+        .sort((a, b) => (b.finishedAt ?? b.createdAt) - (a.finishedAt ?? a.createdAt))[0]
+      if (prior?.findings?.length) {
+        run.comparedToRunId = prior.id
+        run.findings = diffFindingsAgainstPrior(run.findings, prior.findings)
+        const fixed = fixedFindingsSincePrior(run.findings, prior.findings)
+        if (fixed.length) {
+          log(
+            'info',
+            `Since run ${prior.id}: ${run.findings.filter((f) => f.delta === 'new').length} new, ${fixed.length} fixed`
+          )
+        }
+      }
+    } catch {
+      /* listRuns may fail mid-run */
+    }
+
     run.scorecard = scoreRun(run.findings, run.pages.length, cfg.brutality)
     if (aiEnabled && !state.cancelled) {
       try {

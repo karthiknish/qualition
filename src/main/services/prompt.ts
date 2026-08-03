@@ -7,6 +7,7 @@
  * for, and an explicit instruction not to redesign things that are fine.
  */
 import type { ComponentRecommendation, Finding, Run, Severity } from '../../shared/types.js'
+import { sortFindingsForBrief } from './audit.js'
 
 const SEVERITY_ORDER: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
 
@@ -270,7 +271,7 @@ function selectFindings(run: Run, opts: PromptOptions): Finding[] {
       break
   }
 
-  return dedupeFindingsForPrompt(list).slice(0, max)
+  return sortFindingsForBrief(dedupeFindingsForPrompt(list)).slice(0, max)
 }
 
 function focusConflictNote(findings: Finding[]): string | null {
@@ -453,10 +454,14 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
     out.push(`### ${sev.toUpperCase()}`)
     for (const f of group) {
       out.push('')
-      out.push(`**[${f.id}] ${f.title}** _(${f.category})_ ${f.source === 'ai' ? '`[review]`' : '`[measured]`'}`)
+      out.push(`**[${f.id}] ${f.title}** _(${f.category})_ ${f.source === 'ai' ? '`[review]`' : '`[measured]`'}${f.provenance?.ownership === 'dev-chrome' ? ' `[dev-only]`' : f.provenance?.ownership === 'third-party' ? ' `[third-party]`' : ''}${f.effort ? ` \`[effort:${f.effort}]\`` : ''}${f.delta ? ` \`[${f.delta}]\`` : ''}`)
       out.push(`- Evidence: ${trimEvidence(f.detail)}`)
       out.push(`- Required fix: ${f.fix}`)
       out.push(`- Where: ${formatWhere(f)}`)
+      if (f.provenance?.sourceFile) {
+        out.push(`- Source: ${f.provenance.sourceFile}${f.provenance.sourceLine ? `:${f.provenance.sourceLine}` : ''}`)
+      }
+      if (f.provenance?.note) out.push(`- Provenance: ${f.provenance.note}`)
     }
   }
 

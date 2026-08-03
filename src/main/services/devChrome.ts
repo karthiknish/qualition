@@ -18,7 +18,10 @@ import type { Page } from 'playwright'
 export const DEV_CHROME_ATTRS = [
   'data-feedback-toolbar',
   'data-annotation-popup',
-  'data-annotation-marker'
+  'data-annotation-marker',
+  'data-agentation-root',
+  'data-agentation-toolbar',
+  'data-agentation-settings-panel'
 ] as const
 
 /**
@@ -42,6 +45,9 @@ export const DEV_CHROME_SELECTORS = [
   '#__stagewise_container'
 ].join(',')
 
+/** Individual selectors for AxeBuilder.exclude (comma join is for querySelectorAll). */
+export const DEV_CHROME_EXCLUDE_LIST = DEV_CHROME_SELECTORS.split(',').map((s) => s.trim()).filter(Boolean)
+
 /**
  * Self-contained browser source for page.evaluate / addInitScript.
  * Keep extract.ts and interaction.ts in sync by calling installDevChromeGuard
@@ -54,6 +60,9 @@ export const IS_DEV_CHROME_BROWSER_SOURCE = `function isDevChrome(el) {
       cur.hasAttribute('data-feedback-toolbar') ||
       cur.hasAttribute('data-annotation-popup') ||
       cur.hasAttribute('data-annotation-marker') ||
+      cur.hasAttribute('data-agentation-root') ||
+      cur.hasAttribute('data-agentation-toolbar') ||
+      cur.hasAttribute('data-agentation-settings-panel') ||
       cur.hasAttribute('data-vercel-toolbar') ||
       cur.hasAttribute('data-nextjs-toast') ||
       cur.hasAttribute('data-nextjs-dialog') ||

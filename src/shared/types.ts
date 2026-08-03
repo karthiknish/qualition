@@ -22,6 +22,23 @@ export type Category =
 
 export type Viewport = { name: string; width: number; height: number; isMobile: boolean }
 
+/** Who owns the DOM/CSS node behind a finding. */
+export type FindingOwnership = 'first-party' | 'third-party' | 'dev-chrome' | 'unknown'
+
+export type FindingEffort = 'one-line' | 'component' | 'redesign'
+
+export type FindingDelta = 'new' | 'fixed' | 'regressed' | 'unchanged'
+
+export interface FindingProvenance {
+  ownership: FindingOwnership
+  /** null = not checked against a production build. */
+  shipsInProduction: boolean | null
+  bundle?: 'app' | 'framework' | 'vendor' | 'node_modules' | 'vite-dev'
+  sourceFile?: string
+  sourceLine?: number
+  note?: string
+}
+
 export interface Finding {
   id: string
   category: Category
@@ -36,6 +53,26 @@ export interface Finding {
   selector?: string
   evidence?: string[]
   source: 'heuristic' | 'axe' | 'ai' | 'lighthouse' | 'pa11y'
+  provenance?: FindingProvenance
+  /** How hard the fix is — used for “Start here” ordering, not grade weight alone. */
+  effort?: FindingEffort
+  /** low = probe could not use real Tab / soft evidence. */
+  confidence?: 'high' | 'low'
+  /** Vs prior done run with the same targetUrl. */
+  delta?: FindingDelta
+  /** Pages this finding was observed on (after dedupe). */
+  affectedPages?: number
+}
+
+export type BuildMode = 'development' | 'production' | 'unknown'
+
+export interface CaptureContext {
+  buildMode: BuildMode
+  isLocalTarget: boolean
+  hiddenDevChromeNodes: number
+  buildHints: ('vite-hmr' | 'next-dev' | 'react-refresh' | 'vite-client')[]
+  /** Nodes excluded from a11y counts because they are not first-party. */
+  excludedDevChromeControls?: number
 }
 
 export interface SectionComponent {
@@ -212,6 +249,10 @@ export interface CapturedPage {
   toolFailures?: { tool: string; message: string }[]
   /** Verbatim targetable controls found on the page. */
   controls: PageControl[]
+  /** Dev vs prod honesty + how much debug chrome was hidden. */
+  captureContext?: CaptureContext
+  /** Raw extract signals (a11y counts etc.). */
+  signals?: Record<string, unknown>
 
   responsive: {
     viewport: string
@@ -228,6 +269,8 @@ export interface FlowStep {
   target?: string
   value?: string
   note?: string
+  /** Human-readable intent that survives refactors better than a selector. */
+  intent?: string
 }
 
 /** A control that genuinely exists on the page — the only legal flow target. */
@@ -246,6 +289,14 @@ export interface PageControl {
   testId: string
 }
 
+export type FlowStepOutcome = 'ok' | 'refused' | 'absent' | 'timeout' | 'error' | 'skipped'
+
+export interface FlowStartingState {
+  signedInAs?: string
+  storageStateId?: string
+  seededDataNote?: string
+}
+
 export interface FlowResult {
   name: string
   steps: {
@@ -256,12 +307,16 @@ export interface FlowResult {
     screenshot?: string
     /** True when the step never ran because its target does not exist. */
     skipped?: boolean
+    outcome?: FlowStepOutcome
+    domSnapshot?: string
+    humanConfirmed?: boolean
   }[]
   ok: boolean
   totalMs: number
   /** Where the flow came from, and whether it was runnable at all. */
   origin: 'user' | 'ai' | 'derived'
   invalid?: string
+  startingState?: FlowStartingState
 }
 
 export interface MobbinReference {
@@ -401,6 +456,8 @@ export interface AuthResult {
 
 export interface RunConfig {
   targetUrl: string
+  /** Optional production URL for a lightweight second pass (provenance / CSS weight). */
+  productionUrl?: string
   maxPages: number
   viewports: Viewport[]
   useMobbin: boolean
@@ -426,6 +483,8 @@ export interface Run {
   config: RunConfig
   pages: CapturedPage[]
   findings: Finding[]
+  /** Nodes excluded because they are not first-party (explained silence). */
+  excludedFindings?: Finding[]
   flows: FlowResult[]
   references: MobbinReference[]
   recommendations: ComponentRecommendation[]
@@ -433,6 +492,10 @@ export interface Run {
   interactions: InteractionReport[]
   auth?: AuthResult
   scorecard?: Scorecard
+  /** Dominant capture context across pages (dev vs prod honesty). */
+  buildMode?: BuildMode
+  /** Prior run this report was diffed against. */
+  comparedToRunId?: string
   /** What kind of product this is, and why we think so. */
   archetype?: { archetype: 'app' | 'marketing' | 'docs' | 'commerce'; confidence: number; signals: string[] }
   themeSummary?: string

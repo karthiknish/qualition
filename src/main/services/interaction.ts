@@ -70,6 +70,9 @@ const collectControls = function (): any {
         cur.hasAttribute('data-feedback-toolbar') ||
         cur.hasAttribute('data-annotation-popup') ||
         cur.hasAttribute('data-annotation-marker') ||
+        cur.hasAttribute('data-agentation-root') ||
+        cur.hasAttribute('data-agentation-toolbar') ||
+        cur.hasAttribute('data-agentation-settings-panel') ||
         cur.hasAttribute('data-vercel-toolbar') ||
         cur.hasAttribute('data-nextjs-toast') ||
         cur.hasAttribute('data-nextjs-dialog') ||
@@ -82,7 +85,7 @@ const collectControls = function (): any {
       const id = (cur.id || '').toLowerCase()
       if (id.includes('agentation') || id === 'react-scan-root' || id === '__stagewise_container') return true
       const cls = typeof (cur as HTMLElement).className === 'string' ? (cur as HTMLElement).className.toLowerCase() : ''
-      if (cls.includes('agentation')) return true
+      if (cls.includes('agentation') || cls.includes('falnor-agentation')) return true
       if (cur.tagName.toLowerCase() === 'nextjs-portal') return true
       cur = cur.parentElement
     }
@@ -331,19 +334,57 @@ function hasFocusCue(resting: any, focused: any): boolean {
 }
 
 /**
- * Count tabbable controls the way Playwright/Chromium see them — used to gate
- * the false "Nothing is reachable by keyboard" critical that fires when Tab
- * leaves the page into browser chrome (playwright#39268) or headless focus is soft.
+ * Count visible tabbable / interactive controls — used to gate the false
+ * "Nothing is reachable by keyboard" critical when Tab leaves the page into
+ * browser chrome (playwright#39268) or headless focus is soft.
+ *
+ * Must stay wider than `a[href], button` alone: SPA nav often uses role=button
+ * / role=link without a native href, which the mouse probe still exercises.
  */
-async function countPlaywrightFocusables(page: Page): Promise<number> {
+export async function countPlaywrightFocusables(page: Page): Promise<number> {
   try {
+    const fromDom = await page.evaluate(() => {
+      const isDev =
+        (window as unknown as { __qualitionIsDevChrome?: (e: Element | null) => boolean }).__qualitionIsDevChrome
+      const sel =
+        'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [role=button], [role=link], [role=tab], [role=menuitem], [role=switch], [tabindex]:not([tabindex="-1"])'
+      return Array.from(document.querySelectorAll(sel)).filter((el) => {
+        if (typeof isDev === 'function' && isDev(el)) return false
+        const r = (el as HTMLElement).getBoundingClientRect()
+        if (r.width < 1 || r.height < 1) return false
+        const cs = getComputedStyle(el)
+        if (cs.display === 'none' || cs.visibility === 'hidden') return false
+        if ((el as HTMLElement).inert || el.closest('[inert], [aria-hidden="true"]')) return false
+        return true
+      }).length
+    })
+    if (fromDom > 0) return fromDom
     const loc = page.locator(
-      'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])'
+      'a[href], button:not([disabled]), input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled]), summary, [role=button], [role=link], [tabindex]:not([tabindex="-1"])'
     )
     return await loc.count()
   } catch {
     return 0
   }
+}
+
+/**
+ * Whether to emit the critical "nothing reachable by keyboard" finding.
+ * Skip when the mouse probe already operated controls, or when the DOM has
+ * focusables but Tab escaped to chrome / headless focus glitched.
+ */
+export function shouldEmitKeyboardUnreachable(opts: {
+  tabStops: number
+  focusableCount: number
+  controlsProbed: number
+  /** Skip link or other landmark navigation present. */
+  hasSkipLink?: boolean
+}): boolean {
+  if (opts.tabStops > 0) return false
+  if (opts.focusableCount > 0) return false
+  if (opts.controlsProbed > 0) return false
+  if (opts.hasSkipLink) return false
+  return true
 }
 
 export interface ProbeOptions {
@@ -569,10 +610,33 @@ export async function probeInteractions(
           report.noHoverFeedback.push(label)
         }
 
-        // Focus indicator — prefer locator.focus() (Playwright actionability path)
-        // then re-check after a synthetic Tab if programmatic focus showed no cue
-        // (:focus-visible often only applies after keyboard focus).
-        await soft(locator.focus({ timeout: deadline.slice(2000) }), deadline.slice(2500), 'focus', undefined)
+        // Focus indicator — Tab-first so :focus-visible matches. Programmatic
+        // .focus() alone never lights a correct :focus-visible ring in Chrome.
+        let usedTab = false
+        let focusVisible = false
+        await soft(
+          page.evaluate((s) => {
+            const el = document.querySelector(s) as HTMLElement | null
+            if (el && typeof el.focus === 'function') el.focus({ preventScroll: true })
+          }, sel),
+          deadline.slice(1500),
+          'seed for tab',
+          undefined
+        )
+        // Walk Tab until our control is active (cap 8 hops).
+        for (let hop = 0; hop < 8; hop++) {
+          const onTarget = await soft(
+            page.evaluate((s) => document.activeElement === document.querySelector(s), sel),
+            deadline.slice(1000),
+            'tab hop check',
+            false
+          )
+          if (onTarget) {
+            usedTab = hop > 0 || true
+            break
+          }
+          await soft(page.keyboard.press('Tab'), deadline.slice(1200), 'tab-to-control', undefined)
+        }
         await page.waitForTimeout(80)
         let focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus style', null)
         let isFocused = await soft(
@@ -581,21 +645,35 @@ export async function probeInteractions(
           'focus check',
           false
         )
-        if (isFocused && focused && !hasFocusCue(c.resting, focused)) {
-          // Retry with keyboard focus — many UIs only style :focus-visible.
-          await soft(page.keyboard.press('Shift+Tab'), deadline.slice(1500), 'shift-tab', undefined)
-          await soft(page.keyboard.press('Tab'), deadline.slice(1500), 'tab-refocus', undefined)
+        focusVisible = !!(await soft(
+          page.evaluate((s) => {
+            const el = document.querySelector(s)
+            try {
+              return !!el && typeof (el as HTMLElement).matches === 'function' && (el as HTMLElement).matches(':focus-visible')
+            } catch {
+              return false
+            }
+          }, sel),
+          deadline.slice(1000),
+          'focus-visible',
+          false
+        ))
+        if (!isFocused) {
+          // Fall back to locator.focus — mark confidence low if we later flag.
+          await soft(locator.focus({ timeout: deadline.slice(2000) }), deadline.slice(2500), 'focus', undefined)
           await page.waitForTimeout(80)
-          focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus-visible style', null)
+          focused = await soft(page.evaluate(styleOf), deadline.slice(2000), 'focus style', null)
           isFocused = await soft(
             page.evaluate((s) => document.activeElement === document.querySelector(s), sel),
             deadline.slice(2000),
-            'focus-visible check',
+            'focus check',
             false
           )
+          usedTab = false
         }
-        if (isFocused && focused && !hasFocusCue(c.resting, focused)) {
+        if (isFocused && focused && !hasFocusCue(c.resting, focused) && !focusVisible) {
           report.noFocusIndicator.push(label)
+          ;(report as any)._focusMethod = usedTab ? 'tab' : 'programmatic'
         }
       } catch {
         /* control moved, is covered, or timed out — not fatal */
@@ -837,10 +915,28 @@ export async function probeInteractions(
         }
       }
       report.keyboard.tabStops = stops.length
-      // Only emit the critical when Playwright itself sees no focusables AND Tab
-      // found none — otherwise a Tab-to-chrome / headless focus glitch is not a
-      // product bug (playwright#39268, Chromium headless focus quirks).
-      if (stops.length === 0 && pwFocusables === 0) {
+      // Only emit the critical when Tab found nothing AND the page truly has no
+      // interactive controls. Mouse-probed pages with a soft Tab sweep are a
+      // Playwright/headless focus quirk, not "unusable without a mouse".
+      const hasSkipLink = await soft(
+        page.evaluate(
+          () =>
+            !!document.querySelector(
+              'a[href^="#"][class*=skip i], a[href="#main"], a[href="#content"], a.skip-to-content, a[href="#app"]'
+            )
+        ),
+        2000,
+        'skip-link',
+        false
+      )
+      if (
+        shouldEmitKeyboardUnreachable({
+          tabStops: stops.length,
+          focusableCount: pwFocusables,
+          controlsProbed: report.controlsProbed,
+          hasSkipLink: !!hasSkipLink
+        })
+      ) {
         findings.push(
           mk(
             url,
@@ -851,12 +947,11 @@ export async function probeInteractions(
             { viewport: opts.viewport.name, category: 'accessibility' }
           )
         )
-      } else if (stops.length === 0 && pwFocusables > 0) {
+      } else if (stops.length === 0) {
         opts.onLog?.(
-          `keyboard sweep found 0 tab stops but ${pwFocusables} Playwright focusable(s)${lostDocumentFocus ? ' (document lost focus — likely Tab escaped to chrome)' : ''} — skipping false critical on ${url}`
+          `keyboard sweep found 0 tab stops (focusables=${pwFocusables}, probed=${report.controlsProbed})${lostDocumentFocus ? ' (document lost focus — likely Tab escaped to chrome)' : ''} — skipping false critical on ${url}`
         )
-        // Still record inventory so reachableRatio stays honest.
-        report.keyboard.tabStops = Math.min(pwFocusables, 25)
+        report.keyboard.tabStops = Math.min(Math.max(pwFocusables, report.controlsProbed, 1), 25)
       }
     } catch {
       /* navigation raced */
@@ -889,9 +984,9 @@ function summarise(r: InteractionReport, url: string, viewport: string): Finding
     out.push(
       mk(url, r.noFocusIndicator.length > 5 ? 'critical' : 'major',
         `${r.noFocusIndicator.length} control(s) have no visible focus state`,
-        `Focused programmatically with zero computed-style change: ${list(r.noFocusIndicator)}. Keyboard users cannot tell where they are (WCAG 2.4.7).`,
+        `After keyboard Tab focus, zero computed-style change and :focus-visible did not match: ${list(r.noFocusIndicator)}. Keyboard users cannot tell where they are (WCAG 2.4.7).`,
         'Add a :focus-visible ring using the token ring colour — never outline:none without a replacement.',
-        { viewport, category: 'accessibility' })
+        { viewport, category: 'accessibility', confidence: 'high', effort: 'one-line' })
     )
   }
   if (r.noHoverFeedback.length) {

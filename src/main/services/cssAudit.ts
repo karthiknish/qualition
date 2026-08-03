@@ -282,13 +282,14 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
   if (totalBytes > 500_000) {
     const appKb = attr ? (attr.appBytes / 1024).toFixed(0) : '?'
     const fwKb = attr ? ((attr.frameworkBytes + attr.vendorBytes) / 1024).toFixed(0) : '?'
+    const dev = page.captureContext?.buildMode === 'development'
     out.push(
       mk(
         page,
         'performance',
-        totalBytes > 1_000_000 ? 'major' : 'minor',
-        `${(totalBytes / 1024).toFixed(0)} kB of CSS across ${stats.sheets} stylesheet(s)`,
-        `Large stylesheets block first render. First-party ~${appKb} kB; framework/vendor ~${fwKb} kB.${note}`,
+        dev ? 'nit' : totalBytes > 1_000_000 ? 'major' : 'minor',
+        `${(totalBytes / 1024).toFixed(0)} kB of CSS across ${stats.sheets} stylesheet(s)${dev ? ' (dev)' : ''}`,
+        `Large stylesheets block first render. First-party ~${appKb} kB; framework/vendor ~${fwKb} kB.${note}${dev ? ' [dev-server artifact — unbundled Vite sheets; re-audit production]' : ''}`,
         'Split per route, purge unused rules, and load non-critical CSS asynchronously. Prefer not shipping full framework CSS if the app only needs a fraction.'
       )
     )

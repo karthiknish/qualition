@@ -35,6 +35,8 @@ export interface ValidatedFlow {
   steps: FlowStep[]
   /** Set when the flow cannot be run against this site at all. */
   invalid?: string
+  /** Fill targets that correctly refuse (readonly/disabled) — not product defects. */
+  refusedFills?: string[]
 }
 
 function norm(s: string): string {
@@ -105,6 +107,8 @@ export function validateFlow(
     )
   )
   const problems: string[] = []
+  const refusedFills: string[] = []
+  const cleanedSteps: FlowStep[] = []
 
   for (const step of flow.steps) {
     if (step.action === 'goto') {
@@ -117,6 +121,7 @@ export function validateFlow(
       }
       path = path.replace(/\/$/, '') || '/'
       if (!paths.has(path)) problems.push(`route ${path} was never found by the crawl`)
+      else cleanedSteps.push({ ...step, intent: step.intent ?? `Open ${path}` })
       continue
     }
 
@@ -129,46 +134,71 @@ export function validateFlow(
         problems.push(`${step.action} step has no target`)
         continue
       }
-      // CSS selectors are taken on trust; semantic targets must have been seen.
       const isSemantic = /^(text|label|placeholder|role)=/.test(target)
-      if (!isSemantic) continue
-      // A fill must land on something typeable.
+      if (!isSemantic) {
+        cleanedSteps.push({
+          ...step,
+          intent: step.intent ?? (step.action === 'fill' ? `Fill ${target}` : `Activate ${target}`)
+        })
+        continue
+      }
       const corpus = step.action === 'fill' ? fieldHandles : allHandles
-      const exists = [...corpus].some((h) => h === needle || h.includes(needle) || needle.includes(h))
+      const exists = [...corpus].some((h) => h === needle || h.startsWith(needle) || needle.startsWith(h))
       if (!exists) {
-        // Distinguish "there is no such field" from "the field is not fillable",
-        // because the fix is different for each.
         const matchesReadOnly =
           step.action === 'fill' &&
           pages
             .flatMap((p) => p.controls ?? [])
             .filter((c) => c.editable === false)
             .flatMap((c) => [c.placeholder, c.label, c.ariaLabel, c.name].filter(Boolean).map(norm))
-            .some((h) => h === needle || h.includes(needle) || needle.includes(h))
+            .some((h) => h === needle || h.startsWith(needle) || needle.startsWith(h))
+        if (matchesReadOnly) {
+          refusedFills.push(target)
+          cleanedSteps.push({
+            ...step,
+            intent: step.intent ?? `Refuse fill on readonly ${target}`,
+            note: 'readonly/disabled — product correctly refuses'
+          })
+          continue
+        }
         problems.push(
-          matchesReadOnly
-            ? `"${target}" is a readonly/disabled field and cannot be filled`
-            : step.action === 'fill'
-              ? `no editable input/textarea/select matching "${target}" exists on any crawled page`
-              : `no control matching "${target}" exists on any crawled page`
+          step.action === 'fill'
+            ? `no editable input/textarea/select matching "${target}" exists on any crawled page`
+            : `no control matching "${target}" exists on any crawled page`
         )
+        continue
       }
+      cleanedSteps.push({
+        ...step,
+        intent:
+          step.intent ??
+          (step.action === 'fill' ? `Enter value in ${value || target}` : `Activate “${value || target}”`)
+      })
       continue
     }
 
     if (step.action === 'assertText') {
       const needle = norm(step.value ?? step.target ?? '')
       if (!needle) {
-        // An empty assertion silently "passes" and proves nothing.
         problems.push('assertText step has no text to assert')
         continue
       }
       const seen = allText.some((t) => t.includes(needle)) || [...allHandles].some((h) => h.includes(needle))
       if (!seen) problems.push(`text "${needle}" was never seen on any crawled page`)
+      else cleanedSteps.push({ ...step, intent: step.intent ?? `Confirm “${needle}” is visible` })
+      continue
     }
+
+    cleanedSteps.push({
+      ...step,
+      intent:
+        step.intent ??
+        (step.action === 'wait' ? 'Wait for UI to settle' : step.action === 'scroll' ? 'Scroll the page' : step.action)
+    })
   }
 
-  return problems.length > 0 ? { ...flow, invalid: problems.slice(0, 3).join('; ') } : { ...flow }
+  if (problems.length > 0) return { ...flow, invalid: problems.slice(0, 3).join('; ') }
+  return { name: flow.name, steps: cleanedSteps, refusedFills: refusedFills.length ? refusedFills : undefined }
 }
 
 export function validateFlows(
@@ -232,7 +262,7 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
     const assertion = assertionFor(page)
     if (assertion) sweep.push({ action: 'assertText', value: assertion })
   }
-  if (sweep.length >= 2) flows.push({ name: 'Route sweep', steps: sweep })
+  if (sweep.length >= 2) flows.push({ name: 'Visit every discovered route', steps: sweep })
 
   /* 2. Primary conversion path — hero CTA on the entry page. */
   const entry = ok[0]
@@ -246,14 +276,14 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
     .find((label) => label.length > 2 && label.length < 30 && !UNSAFE.test(label))
   if (heroCta) {
     const steps: FlowStep[] = [
-      { action: 'goto', target: pathOf(entry.url) },
-      { action: 'click', target: `text=${heroCta}`, note: 'primary call to action' },
-      { action: 'wait', value: '1200' }
+      { action: 'goto', target: pathOf(entry.url), intent: 'Open the entry page' },
+      { action: 'click', target: `text=${heroCta}`, note: 'primary call to action', intent: `Start work via “${heroCta}”` },
+      { action: 'wait', value: '1200', intent: 'Wait for navigation' }
     ]
     const target = ok.find((p) => p.url !== entry.url)
     const assertion = target ? assertionFor(target) : assertionFor(entry)
-    if (assertion) steps.push({ action: 'assertText', value: assertion })
-    flows.push({ name: `Primary CTA — "${heroCta}"`, steps })
+    if (assertion) steps.push({ action: 'assertText', value: assertion, intent: `Confirm “${assertion}” is visible` })
+    flows.push({ name: `Start work — “${heroCta}”`, steps })
   }
 
   /* 3. Navigation menu — does the header actually take you anywhere? */

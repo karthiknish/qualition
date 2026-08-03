@@ -24,6 +24,7 @@ export default function NewRun({
   const [context, setContext] = useState('')
   const [maxPages, setMaxPages] = useState(5)
   const [brutality, setBrutality] = useState<RunConfig['brutality']>('ruthless')
+  const [productionUrl, setProductionUrl] = useState('')
   const [useMobbin, setUseMobbin] = useState(true)
   const [useShadcn, setUseShadcn] = useState(true)
   const [useGemini, setUseGemini] = useState(true)
@@ -88,6 +89,7 @@ export default function NewRun({
     try {
       const config: RunConfig = {
         targetUrl: normalizeTargetUrl(url) ?? url.trim(),
+        productionUrl: productionUrl.trim() ? normalizeTargetUrl(productionUrl) ?? productionUrl.trim() : undefined,
         maxPages,
         viewports: viewports.filter((v) => enabledVps[v.name]),
         useMobbin,
@@ -144,6 +146,11 @@ export default function NewRun({
               will audit <span className="text-zinc-300">{normalized}</span>
             </p>
           )}
+          <Input
+            value={productionUrl}
+            onChange={setProductionUrl}
+            placeholder="Optional production URL — compare so Vite/HMR findings are marked “does not ship”"
+          />
           <Input
             value={context}
             onChange={setContext}

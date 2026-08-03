@@ -10,7 +10,7 @@ import { extractFn, observerInit } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
 import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
-import { hideDevChrome, installDevChromeGuard } from './devChrome.js'
+import { DEV_CHROME_EXCLUDE_LIST, hideDevChrome, installDevChromeGuard } from './devChrome.js'
 import { configurePlaywrightBrowsersPath } from './browsers.js'
 import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
 import type {
@@ -157,6 +157,7 @@ export async function capturePage(
   let errorText: string | undefined
   let sections: PageSection[] = []
   const toolFailures: { tool: string; message: string }[] = []
+  let hiddenChromeTotal = 0
 
   for (const vp of opts.viewports) {
     const ctx = await browser.newContext({
@@ -237,7 +238,10 @@ export async function capturePage(
       // Hide Agentation / Vercel toolbar / similar before we screenshot or walk the DOM.
       // MutationObserver (from installDevChromeGuard) re-hides remounts.
       const hiddenChrome = await hideDevChrome(page)
-      if (hiddenChrome > 0) opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) (Agentation etc.) on ${url}`)
+      if (hiddenChrome > 0) {
+        hiddenChromeTotal += hiddenChrome
+        opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) (Agentation etc.) on ${url}`)
+      }
 
       const shot = join(opts.outDir, `${slug}-${vp.name}.png`)
       await page.screenshot({ path: shot, fullPage: true, animations: 'disabled' })
@@ -327,12 +331,28 @@ export async function capturePage(
         }
 
         try {
+          // Re-hide in case Agentation remounted during CSS fetch / section shots.
+          await hideDevChrome(page)
           // Official Deque integration: handles iframes, CSP and version drift.
-          const result: any = await new AxeBuilder({ page })
-            // WCAG 2.2 was missing, which silently skipped target-size (2.5.8),
-            // meta-refresh, blink and marquee.
-            .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice'])
-            .analyze()
+          // Exclude known debug overlays so a remount race cannot invent button-name
+          // findings for Agentation's styles-module__controlButton icons.
+          let builder = new AxeBuilder({ page }).withTags([
+            'wcag2a',
+            'wcag2aa',
+            'wcag21a',
+            'wcag21aa',
+            'wcag22a',
+            'wcag22aa',
+            'best-practice'
+          ])
+          for (const sel of DEV_CHROME_EXCLUDE_LIST) {
+            try {
+              builder = builder.exclude(sel)
+            } catch {
+              /* invalid selector for this axe version — skip */
+            }
+          }
+          const result: any = await builder.analyze()
           axe = (result.violations ?? []).map((v: any) => ({
             id: v.id,
             impact: v.impact ?? null,
@@ -359,6 +379,11 @@ export async function capturePage(
   }
 
   const perf = extracted?.perf ?? {}
+  const build = extracted?.buildContext ?? {
+    buildMode: 'unknown' as const,
+    isLocalTarget: false,
+    buildHints: [] as string[]
+  }
   return {
     url,
     title: extracted?.title ?? '',
@@ -387,10 +412,16 @@ export async function capturePage(
     networkFailures: dedupeNetwork(networkFailures).slice(0, 40),
     toolFailures: toolFailures.length ? toolFailures : undefined,
     controls: extracted?.controls ?? [],
+    captureContext: {
+      buildMode: build.buildMode,
+      isLocalTarget: !!build.isLocalTarget,
+      hiddenDevChromeNodes: hiddenChromeTotal,
+      buildHints: build.buildHints ?? [],
+      excludedDevChromeControls: Number(extracted?.signals?.excludedDevChromeControls ?? 0) || undefined
+    },
+    signals: extracted?.signals ?? {},
     responsive,
-    links: extracted?.links ?? [],
-    // signals ride along for the heuristic pass
-    ...({ signals: extracted?.signals ?? {} } as any)
+    links: extracted?.links ?? []
   }
 }
 
@@ -536,21 +567,34 @@ function score(u: string): number {
 export async function runFlow(
   browser: Browser,
   baseUrl: string,
-  flow: { name: string; steps: FlowStep[]; invalid?: string; origin?: FlowResult['origin'] },
+  flow: {
+    name: string
+    steps: FlowStep[]
+    invalid?: string
+    origin?: FlowResult['origin']
+    refusedFills?: string[]
+    startingState?: FlowResult['startingState']
+  },
   outDir: string,
   storageState?: string
 ): Promise<FlowResult> {
   const origin = flow.origin ?? 'user'
-  // A flow whose targets do not exist is not a product failure; do not spend
-  // 15s per step proving it, and do not blame the site for it.
   if (flow.invalid) {
     return {
       name: flow.name,
-      steps: flow.steps.map((step) => ({ step, ok: false, ms: 0, skipped: true, error: 'not run — target does not exist' })),
+      steps: flow.steps.map((step) => ({
+        step,
+        ok: false,
+        ms: 0,
+        skipped: true,
+        outcome: 'absent',
+        error: 'not run — target does not exist'
+      })),
       ok: false,
       totalMs: 0,
       origin,
-      invalid: flow.invalid
+      invalid: flow.invalid,
+      startingState: flow.startingState
     }
   }
   const ctx = await browser.newContext({
@@ -561,16 +605,56 @@ export async function runFlow(
   const results: FlowResult['steps'] = []
   const started = Date.now()
   let ok = true
+  const refusedSet = new Set((flow.refusedFills ?? []).map((t) => t.toLowerCase()))
 
   for (let i = 0; i < flow.steps.length; i++) {
     const step = flow.steps[i]
     const t0 = Date.now()
+    const isRefusedFill =
+      step.action === 'fill' &&
+      (!!step.note?.includes('readonly') || refusedSet.has((step.target ?? '').toLowerCase()))
     try {
+      if (isRefusedFill) {
+        let snap = ''
+        try {
+          snap = await page
+            .locator(step.target?.startsWith('label=') ? `text=${step.target.slice(6)}` : 'body')
+            .first()
+            .evaluate((n) => (n.parentElement ?? n).outerHTML.slice(0, 800))
+            .catch(() => '')
+        } catch {
+          /* ignore */
+        }
+        results.push({
+          step,
+          ok: true,
+          ms: Date.now() - t0,
+          skipped: true,
+          outcome: 'refused',
+          domSnapshot: snap || undefined,
+          error: 'control correctly refused fill (readonly/disabled)'
+        })
+        continue
+      }
       await execStep(page, step, baseUrl)
       const shot = join(outDir, `flow-${flow.name.replace(/\W+/g, '_')}-${i}.png`)
       await page.screenshot({ path: shot })
-      results.push({ step, ok: true, ms: Date.now() - t0, screenshot: shot })
+      let domSnapshot: string | undefined
+      try {
+        if (step.target) {
+          domSnapshot = await resolve(page, step.target)
+            .first()
+            .evaluate((n) => (n.parentElement ?? n).outerHTML.slice(0, 800))
+            .catch(() => undefined)
+        }
+      } catch {
+        /* ignore */
+      }
+      results.push({ step, ok: true, ms: Date.now() - t0, screenshot: shot, outcome: 'ok', domSnapshot })
     } catch (e) {
+      const msg = (e as Error).message.slice(0, 300)
+      const outcome =
+        /timeout|waiting for/i.test(msg) ? ('timeout' as const) : /not found|no element|strict mode/i.test(msg) ? ('absent' as const) : ('error' as const)
       ok = false
       const shot = join(outDir, `flow-${flow.name.replace(/\W+/g, '_')}-${i}-FAIL.png`)
       try {
@@ -578,12 +662,26 @@ export async function runFlow(
       } catch {
         /* page may be gone */
       }
-      results.push({ step, ok: false, ms: Date.now() - t0, error: (e as Error).message.slice(0, 300), screenshot: shot })
+      results.push({
+        step,
+        ok: false,
+        ms: Date.now() - t0,
+        error: msg,
+        screenshot: shot,
+        outcome
+      })
       break
     }
   }
   await ctx.close()
-  return { name: flow.name, steps: results, ok, totalMs: Date.now() - started, origin }
+  return {
+    name: flow.name,
+    steps: results,
+    ok,
+    totalMs: Date.now() - started,
+    origin,
+    startingState: flow.startingState ?? (storageState ? { storageStateId: storageState, seededDataNote: 'Playwright storageState' } : undefined)
+  }
 }
 
 async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<void> {
@@ -601,9 +699,26 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
       await clickResiliently(page, step.target!, timeout)
       await page.waitForTimeout(700)
       return
-    case 'fill':
-      await resolve(page, step.target!).fill(step.value ?? '', { timeout })
+    case 'fill': {
+      const loc = resolve(page, step.target!).first()
+      const blocked = await loc
+        .evaluate((node) => {
+          const i = node as HTMLInputElement
+          return !!(
+            i.readOnly ||
+            i.disabled ||
+            node.getAttribute('aria-disabled') === 'true' ||
+            node.getAttribute('aria-readonly') === 'true'
+          )
+        })
+        .catch(() => false)
+      if (blocked) {
+        // Soft-skip: product-correct refusal — caller records outcome=refused.
+        return
+      }
+      await loc.fill(step.value ?? '', { timeout })
       return
+    }
     case 'press':
       await page.keyboard.press(step.value ?? 'Enter')
       await page.waitForTimeout(700)

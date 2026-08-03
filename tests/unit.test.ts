@@ -8,7 +8,7 @@ import { auditPage, dedupeFindings, deltaE, parseColor, scoreRun, themeSummary }
 import { detectArchetype, queryForSection } from '../src/main/services/archetype.js'
 import { analyzeCss, auditCss } from '../src/main/services/cssAudit.js'
 import { diffScreenshots } from '../src/main/services/visual.js'
-import { Deadline } from '../src/main/services/interaction.js'
+import { Deadline, shouldEmitKeyboardUnreachable } from '../src/main/services/interaction.js'
 import { isValidTarget, normalizeTargetUrl, schemeFallback, isLocalHost } from '../src/shared/url.js'
 import { loginUrlGuesses, passwordCandidates, redactAuth, usernameCandidates } from '../src/main/services/auth.js'
 import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services/runner.js'
@@ -106,7 +106,7 @@ test('palette sprawl and near-duplicate colours are both reported', () => {
   colors.push({ value: 'rgb(10, 40, 60)', usage: 4, role: 'bg' as const })
   colors.push({ value: 'rgb(11, 40, 60)', usage: 4, role: 'bg' as const })
   const findings = auditPage(page({ tokens: { ...page().tokens, colors } }), config)
-  assert.ok(findings.some((f) => /distinct colours/.test(f.title)))
+  assert.ok(findings.some((f) => /colour decisions|distinct colours|raw colours collapse/i.test(f.title)))
   assert.ok(findings.some((f) => /near-duplicate/.test(f.title)))
 })
 
@@ -208,12 +208,84 @@ test('auditCss reports z-index sprawl and !important abuse', () => {
 })
 
 test('DEV_CHROME_SELECTORS cover Agentation toolbar markers', async () => {
-  const { DEV_CHROME_ATTRS, DEV_CHROME_SELECTORS } = await import('../src/main/services/devChrome.js')
+  const { DEV_CHROME_ATTRS, DEV_CHROME_SELECTORS, DEV_CHROME_EXCLUDE_LIST, IS_DEV_CHROME_BROWSER_SOURCE } =
+    await import('../src/main/services/devChrome.js')
   assert.ok(DEV_CHROME_ATTRS.includes('data-feedback-toolbar'))
   assert.ok(DEV_CHROME_ATTRS.includes('data-annotation-popup'))
   assert.ok(DEV_CHROME_ATTRS.includes('data-annotation-marker'))
+  assert.ok(DEV_CHROME_ATTRS.includes('data-agentation-root'))
+  assert.ok(DEV_CHROME_ATTRS.includes('data-agentation-toolbar'))
   assert.match(DEV_CHROME_SELECTORS, /agentation/i)
   assert.match(DEV_CHROME_SELECTORS, /data-feedback-toolbar/)
+  assert.ok(DEV_CHROME_EXCLUDE_LIST.includes('[data-feedback-toolbar]'))
+  assert.ok(DEV_CHROME_EXCLUDE_LIST.includes('[data-agentation-root]'))
+  assert.match(IS_DEV_CHROME_BROWSER_SOURCE, /data-agentation-root/)
+})
+
+test('isDevChrome matches Agentation controlButton ancestry, not first-party CSS modules', async () => {
+  // Agentation's icon buttons are styles-module__controlButton with no "agentation"
+  // in their own class — only ancestors carry data-feedback-toolbar / data-agentation-*.
+  const { IS_DEV_CHROME_BROWSER_SOURCE } = await import('../src/main/services/devChrome.js')
+  type Fake = {
+    hasAttribute: (a: string) => boolean
+    id: string
+    className: string
+    tagName: string
+    parentElement: Fake | null
+  }
+  const docEl: Fake = {
+    hasAttribute: () => false,
+    id: '',
+    className: '',
+    tagName: 'HTML',
+    parentElement: null
+  }
+  const g = globalThis as typeof globalThis & { document?: { documentElement: Fake } }
+  const prev = g.document
+  g.document = { documentElement: docEl }
+  try {
+    const isDevChrome = new Function(`${IS_DEV_CHROME_BROWSER_SOURCE}; return isDevChrome;`)() as (el: Fake) => boolean
+    const root: Fake = {
+      hasAttribute: (a) => a === 'data-agentation-root',
+      id: '',
+      className: '',
+      tagName: 'DIV',
+      parentElement: docEl
+    }
+    const toolbar: Fake = {
+      hasAttribute: (a) => a === 'data-feedback-toolbar',
+      id: '',
+      className: 'falnor-agentation',
+      tagName: 'DIV',
+      parentElement: root
+    }
+    const btn: Fake = {
+      hasAttribute: () => false,
+      id: '',
+      className: 'styles-module__controlButton___8Q0jc',
+      tagName: 'BUTTON',
+      parentElement: toolbar
+    }
+    assert.equal(isDevChrome(btn), true)
+
+    const firstParty: Fake = {
+      hasAttribute: () => false,
+      id: '',
+      className: 'styles-module__controlButton___8Q0jc',
+      tagName: 'BUTTON',
+      parentElement: {
+        hasAttribute: () => false,
+        id: '',
+        className: 'app-toolbar',
+        tagName: 'DIV',
+        parentElement: docEl
+      }
+    }
+    assert.equal(isDevChrome(firstParty), false, 'first-party CSS-module buttons must not be excluded')
+  } finally {
+    if (prev === undefined) delete g.document
+    else g.document = prev
+  }
 })
 
 test('classifyCssSheet separates CDN, framework and app CSS', async () => {
@@ -750,7 +822,7 @@ test('flows are derived from the crawl when none are supplied and AI is off', ()
   const flows = heuristicFlows([home, pricing])
   assert.ok(flows.length >= 2, `expected several derived flows, got ${flows.length}`)
 
-  const sweep = flows.find((f) => f.name === 'Route sweep')!
+  const sweep = flows.find((f) => f.name === 'Visit every discovered route' || f.name === 'Route sweep')!
   assert.ok(sweep, 'a route sweep must exist so every crawled page is visited')
   assert.deepEqual(
     sweep.steps.filter((s) => s.action === 'goto').map((s) => s.target),
@@ -759,15 +831,15 @@ test('flows are derived from the crawl when none are supplied and AI is off', ()
   )
   assert.ok(sweep.steps.some((s) => s.action === 'assertText'), 'each route must be asserted, not just opened')
 
-  const cta = flows.find((f) => f.name.startsWith('Primary CTA'))!
-  assert.ok(cta.name.includes('Get started'))
+  const cta = flows.find((f) => f.name.startsWith('Start work') || f.name.startsWith('Primary CTA'))!
+  assert.ok(cta && (cta.name.includes('Get started') || /Start work/i.test(cta.name)))
   assert.ok(
     !flows.some((f) => JSON.stringify(f).includes('Delete account')),
     'destructive labels must never become a flow step'
   )
 })
 
-test('readonly fields are rejected as fill targets', () => {
+test('readonly fields are refused fills, not invalid defects', () => {
   // Real failure: `fill label=Email address` resolved to
   // <input readonly aria-disabled="true"> and timed out after 6s.
   const settings = page({
@@ -793,8 +865,9 @@ test('readonly fields are rejected as fill targets', () => {
     ] },
     [settings]
   )
-  assert.ok(readonlyFill.invalid, 'a readonly field must not be proposed as a fill target')
-  assert.match(readonlyFill.invalid!, /readonly|disabled/i)
+  assert.equal(readonlyFill.invalid, undefined, 'readonly must not invalidate the whole flow')
+  assert.ok(readonlyFill.refusedFills?.length, 'must record refused fill')
+  assert.ok(readonlyFill.steps.some((s) => /readonly/i.test(s.note ?? '')))
 
   // The genuinely editable field still validates.
   const ok = validateFlow(
@@ -1353,4 +1426,141 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
   assert.equal(cardMentions.length, 1)
   assert.match(text, /### nav/)
   assert.match(text, /Execute the root-cause list above in order/)
+})
+
+test('keyboard unreachable critical is gated on empty probes', () => {
+  assert.equal(
+    shouldEmitKeyboardUnreachable({ tabStops: 0, focusableCount: 0, controlsProbed: 0 }),
+    true
+  )
+  assert.equal(
+    shouldEmitKeyboardUnreachable({ tabStops: 0, focusableCount: 0, controlsProbed: 30 }),
+    false
+  )
+  assert.equal(
+    shouldEmitKeyboardUnreachable({ tabStops: 0, focusableCount: 12, controlsProbed: 0 }),
+    false
+  )
+  assert.equal(
+    shouldEmitKeyboardUnreachable({ tabStops: 3, focusableCount: 0, controlsProbed: 0 }),
+    false
+  )
+})
+
+test('validateFlow records readonly email fills as refused, not invalid', () => {
+  const p = page({
+    url: 'http://localhost:5181/settings',
+    controls: [
+      {
+        tag: 'input',
+        type: 'text',
+        role: '',
+        editable: false,
+        text: '',
+        placeholder: '',
+        label: 'Email address',
+        ariaLabel: '',
+        name: 'email',
+        href: '',
+        testId: ''
+      }
+    ]
+  })
+  const bad = validateFlow(
+    {
+      name: 'Update settings email',
+      steps: [
+        { action: 'goto', target: '/settings' },
+        { action: 'fill', target: 'label=Email address', value: 'x@y.z' }
+      ]
+    },
+    [p]
+  )
+  assert.equal(bad.invalid, undefined)
+  assert.ok(bad.refusedFills?.length)
+})
+
+test('partitionProductFindings excludes Agentation selectors from product grade', async () => {
+  const { partitionProductFindings, ownershipFromSelector } = await import('../src/main/services/provenance.js')
+  assert.equal(
+    ownershipFromSelector('.styles-module__buttonWrapper___rBcdv > .styles-module__controlButton___8Q0jc'),
+    'dev-chrome'
+  )
+  const { product, excluded, meta } = partitionProductFindings(
+    [
+      {
+        id: 'f1',
+        category: 'accessibility',
+        severity: 'critical',
+        title: 'axe: Buttons must have discernible text',
+        detail: 'x',
+        fix: 'y',
+        pageUrl: 'http://localhost:5181/',
+        selector: '.styles-module__buttonWrapper___x > .styles-module__controlButton___y',
+        source: 'axe'
+      },
+      {
+        id: 'f2',
+        category: 'accessibility',
+        severity: 'major',
+        title: 'Missing <html lang>',
+        detail: 'x',
+        fix: 'y',
+        pageUrl: 'http://localhost:5181/',
+        source: 'heuristic'
+      }
+    ],
+    'http://localhost:5181/'
+  )
+  assert.equal(excluded.length, 1)
+  assert.equal(product.length, 1)
+  assert.ok(meta)
+  assert.match(meta!.title, /excluded/i)
+})
+
+test('clusterColourDecisions collapses alpha ladders of one hue', async () => {
+  const { clusterColourDecisions } = await import('../src/main/services/audit.js')
+  const decisions = clusterColourDecisions([
+    'rgba(59, 130, 246, 0.4)',
+    'rgba(59, 130, 246, 0.42)',
+    'rgba(59, 130, 246, 0.48)',
+    'rgba(59, 130, 246, 0.55)',
+    'rgb(239, 68, 68)'
+  ])
+  assert.ok(decisions.length <= 3, `expected <=3 decisions, got ${decisions.length}: ${JSON.stringify(decisions)}`)
+})
+
+test('applyProductionPresence marks absent selectors as does-not-ship', async () => {
+  const { applyProductionPresence } = await import('../src/main/services/provenance.js')
+  const out = applyProductionPresence(
+    [
+      {
+        id: 'a',
+        category: 'accessibility',
+        severity: 'major',
+        title: 'Unnamed button',
+        detail: 'x',
+        fix: 'y',
+        pageUrl: 'http://localhost:5173/',
+        selector: '.agentation-btn',
+        source: 'heuristic'
+      },
+      {
+        id: 'b',
+        category: 'performance',
+        severity: 'minor',
+        title: '420 kB of CSS across 12 stylesheet(s) (dev)',
+        detail: 'transfer bytes high on Vite',
+        fix: 're-audit production',
+        pageUrl: 'http://localhost:5173/',
+        source: 'heuristic'
+      }
+    ],
+    { '.agentation-btn': false },
+    { prodCssBytes: 40_000, auditCssBytes: 420_000, productionUrl: 'https://app.example.com' }
+  )
+  assert.equal(out[0].provenance?.shipsInProduction, false)
+  assert.match(out[0].provenance?.note ?? '', /absent on production/i)
+  assert.equal(out[1].provenance?.shipsInProduction, false)
+  assert.match(out[1].provenance?.note ?? '', /Leaner on production/i)
 })

@@ -11,11 +11,13 @@ import type {
   CapturedPage,
   Category,
   Finding,
+  FindingEffort,
   RunConfig,
   Scorecard,
   Severity
 } from '../../shared/types.js'
 import { SEVERITY_WEIGHT } from '../../shared/types.js'
+import { guessEffort, provenanceForSelector } from './provenance.js'
 
 let counter = 0
 function mk(
@@ -91,14 +93,25 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   const meaningful = t.colors.filter((c) => c.usage >= 2)
   const textColors = meaningful.filter((c) => c.role === 'text')
   const bgColors = meaningful.filter((c) => c.role === 'bg')
-  const distinct = new Set(meaningful.map((c) => c.value)).size
+  const decisions = clusterColourDecisions(meaningful.map((c) => c.value))
+  const distinct = decisions.length
+  const rawDistinct = new Set(meaningful.map((c) => c.value)).size
   const colorBudget = config.brutality === 'ruthless' ? 12 : 18
   if (distinct > colorBudget) {
     out.push(
       mk(page, 'coherence', distinct > colorBudget * 1.8 ? 'critical' : 'major',
-        `${distinct} distinct colours in use`,
-        `Palette budget for a coherent product surface is ~${colorBudget} (bg/text/border combined). Found ${distinct}, top offenders: ${meaningful.slice(0, 8).map((c) => c.value).join(', ')}.`,
-        'Collapse to a token set (background/foreground/muted/accent/destructive + 2 states). Anything not expressible as a CSS variable is drift.')
+        `${distinct} colour decisions in use`,
+        `Palette budget for a coherent product surface is ~${colorBudget} decisions (alpha ladders of one hue count as one). Found ${distinct} decisions across ${rawDistinct} raw values. Top: ${decisions.slice(0, 8).map((d) => d.label).join(', ')}.`,
+        'Collapse near-duplicate alphas of the same hue into one token; reserve status/chart series separately from brand drift.',
+        { effort: 'component' })
+    )
+  } else if (rawDistinct > colorBudget) {
+    out.push(
+      mk(page, 'coherence', 'nit',
+        `${rawDistinct} raw colours collapse to ${distinct} decisions`,
+        'Multiple alphas of the same hue were clustered — treat each cluster as one design decision, not N colours.',
+        'Name the token once and vary opacity via a scale (e.g. color-mix / token alpha).',
+        { effort: 'one-line' })
     )
   }
 
@@ -120,7 +133,8 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
       mk(page, 'coherence', dupes.length > 5 ? 'major' : 'minor',
         `${dupes.length} near-duplicate colour pairs`,
         `Visually identical colours defined separately — the signature of hand-typed hexes: ${dupes.slice(0, 5).join('; ')}.`,
-        'Deduplicate into one token each. Below ΔE2000 2.0 the difference is imperceptible to users but very visible in your CSS.')
+        'Deduplicate into one token each. Below ΔE2000 2.0 the difference is imperceptible to users but very visible in your CSS.',
+        { effort: 'one-line' })
     )
   }
 
@@ -277,24 +291,37 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
     axeSeen.add(v.id)
     const sev: Severity =
       v.impact === 'critical' ? 'critical' : v.impact === 'serious' ? 'major' : v.impact === 'moderate' ? 'minor' : 'nit'
+    const selector = v.nodes[0]?.target?.join(' ')
+    const prov = provenanceForSelector(selector)
+    let detail = `${v.nodes.length} node(s). ${v.nodes[0]?.failureSummary ?? ''} Targets: ${v.nodes
+      .slice(0, 3)
+      .map((n) => n.target.join(' '))
+      .join(' | ')}`
+    if (/contrast/i.test(v.id) || /contrast/i.test(v.help)) {
+      detail +=
+        '\nCompositing: if the reported colours look wrong vs design tokens, check ancestor opacity — e.g. opacity:0.72 on a row composites the token down to the measured pair.'
+    }
     out.push({
       id: `f${++counter}`,
       category: 'accessibility',
       severity: sev,
       title: `axe: ${v.help}`,
-      detail: `${v.nodes.length} node(s). ${v.nodes[0]?.failureSummary ?? ''} Targets: ${v.nodes.slice(0, 3).map((n) => n.target.join(' ')).join(' | ')}`,
+      detail,
       fix: `Resolve per WCAG guidance: ${v.helpUrl}`,
       pageUrl: page.url,
-      selector: v.nodes[0]?.target?.join(' '),
-      source: 'axe'
+      selector,
+      source: 'axe',
+      provenance: prov,
+      effort: /contrast|name|label|lang|alt/i.test(v.id) ? 'one-line' : 'component'
     })
   }
   if (signals.imagesMissingAlt > 0) {
     out.push(
       mk(page, 'accessibility', signals.imagesMissingAlt > 5 ? 'major' : 'minor',
         `${signals.imagesMissingAlt} images without alt text`,
-        'Screen-reader users get filenames or silence.',
-        'Add descriptive alt, or alt="" + aria-hidden for decoration.')
+        `Screen-reader users get filenames or silence.${signals.imagesDecorativeOk ? ` (${signals.imagesDecorativeOk} correctly marked decorative with alt="" — not counted.)` : ''}`,
+        'Add descriptive alt, or alt="" for decoration (empty alt is correct for decorative images).',
+        { effort: 'one-line' })
     )
   }
   if (signals.h1Count === 0) {
@@ -306,7 +333,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
     out.push(mk(page, 'accessibility', 'minor', `${signals.headingOrderIssues} heading-level skips`, 'Levels jump (e.g. h2 → h4), breaking the outline.', 'Never skip levels; style with classes, not tag choice.'))
   }
   if (signals.buttonsWithoutLabel > 0) {
-    out.push(mk(page, 'accessibility', 'major', `${signals.buttonsWithoutLabel} icon-only buttons without a label`, 'Buttons with no text and no aria-label are unusable non-visually.', 'Add aria-label, or a visually hidden span.'))
+    out.push(mk(page, 'accessibility', 'major', `${signals.buttonsWithoutLabel} icon-only buttons without a label`, 'Buttons with no text and no aria-label are unusable non-visually.', 'Add aria-label, or a visually hidden span.', { effort: 'one-line' }))
   }
   if (!signals.hasSkipLink && strict > 0.7) {
     out.push(mk(page, 'accessibility', 'nit', 'No skip-to-content link', 'Keyboard users must tab through the whole nav on every page.', 'Add a focus-visible skip link as the first focusable element.'))
@@ -381,17 +408,35 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
 
   /* ---- performance ---- */
   const m = page.metrics
+  const devBuild = page.captureContext?.buildMode === 'development'
+  const softPerf = (severity: Severity): Severity => (devBuild ? 'nit' : severity)
+  const perfSuffix = devBuild
+    ? ' [dev-server artifact — not actionable; re-audit a production build]'
+    : ''
   if (m.lcpMs && m.lcpMs > 2500) {
-    out.push(mk(page, 'performance', m.lcpMs > 4000 ? 'critical' : 'major', `LCP ${(m.lcpMs / 1000).toFixed(1)}s`, 'Largest Contentful Paint above the 2.5s "good" threshold.', 'Preload the hero asset, serve modern formats, and cut render-blocking JS.'))
+    out.push(mk(page, 'performance', softPerf(m.lcpMs > 4000 ? 'critical' : 'major'), `LCP ${(m.lcpMs / 1000).toFixed(1)}s${devBuild ? ' (dev)' : ''}`, `Largest Contentful Paint above the 2.5s "good" threshold.${perfSuffix}`, 'Preload the hero asset, serve modern formats, and cut render-blocking JS.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
   }
   if (m.cls !== null && m.cls > 0.1) {
-    out.push(mk(page, 'performance', m.cls > 0.25 ? 'critical' : 'major', `CLS ${m.cls.toFixed(3)}`, 'Layout shifts above 0.1 — content moves under the user.', 'Reserve space for images/embeds and avoid late-injected banners.'))
+    out.push(mk(page, 'performance', softPerf(m.cls > 0.25 ? 'critical' : 'major'), `CLS ${m.cls.toFixed(3)}${devBuild ? ' (dev)' : ''}`, `Layout shifts above 0.1 — content moves under the user.${perfSuffix}`, 'Reserve space for images/embeds and avoid late-injected banners.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
   }
   if (m.transferBytes > 3_500_000) {
-    out.push(mk(page, 'performance', 'major', `${(m.transferBytes / 1e6).toFixed(1)} MB transferred`, `${m.requestCount} requests.`, 'Compress and lazy-load below-the-fold media; audit the JS bundle.'))
+    out.push(mk(page, 'performance', softPerf('major'), `${(m.transferBytes / 1e6).toFixed(1)} MB transferred${devBuild ? ' (dev)' : ''}`, `${m.requestCount} requests.${perfSuffix}`, 'Compress and lazy-load below-the-fold media; audit the JS bundle.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
   }
   if (m.longTaskMs > 800) {
-    out.push(mk(page, 'performance', 'minor', `${m.longTaskMs}ms of long tasks`, 'The main thread is blocked, so early clicks feel dead.', 'Split bundles, defer non-critical work, hydrate progressively.'))
+    out.push(mk(page, 'performance', softPerf('minor'), `${m.longTaskMs}ms of long tasks${devBuild ? ' (dev)' : ''}`, `The main thread is blocked, so early clicks feel dead.${perfSuffix}`, 'Split bundles, defer non-critical work, hydrate progressively.', { confidence: devBuild ? 'low' : 'high' }))
+  }
+  if (devBuild && (m.lcpMs || m.transferBytes > 500_000)) {
+    out.push(
+      mk(
+        page,
+        'performance',
+        'nit',
+        'Audited against a development server',
+        `Build mode: development (${(page.captureContext?.buildHints ?? []).join(', ') || 'localhost'}). LCP/CLS/transfer and CSS sheet counts reflect unbundled Vite/HMR — not what ships.`,
+        'Set a Production URL on New audit, or re-run against a built preview (vite preview / next start).',
+        { effort: 'one-line', confidence: 'high' }
+      )
+    )
   }
 
   /* ---- content ---- */
@@ -448,6 +493,8 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
     const urls = [...new Set(group.map((f) => f.pageUrl))]
     out.push({
       ...first,
+      affectedPages: urls.length,
+      effort: first.effort ?? guessEffort(first),
       detail:
         urls.length > 1
           ? `${first.detail}\n\nAffects ${urls.length} pages: ${urls
@@ -462,7 +509,60 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
           : first.detail
     })
   }
-  return out
+  return out.map((f) => ({ ...f, effort: f.effort ?? guessEffort(f) }))
+}
+
+/**
+ * Cluster raw colour values into design "decisions".
+ * Same hue with nearby alphas (0.4 / 0.42 / 0.48 / 0.55) → one decision.
+ */
+export function clusterColourDecisions(values: string[]): { label: string; members: string[] }[] {
+  type Bucket = { h: number; s: number; l: number; members: string[]; alphas: number[] }
+  const buckets: Bucket[] = []
+  for (const v of values) {
+    const p = parseColor(v)
+    if (!p) {
+      buckets.push({ h: -1, s: 0, l: 0, members: [v], alphas: [1] })
+      continue
+    }
+    // Approximate HSL from RGB for clustering.
+    const r = p.r / 255
+    const g = p.g / 255
+    const b = p.b / 255
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    const l = (max + min) / 2
+    const d = max - min
+    const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1))
+    let h = 0
+    if (d !== 0) {
+      if (max === r) h = ((g - b) / d) % 6
+      else if (max === g) h = (b - r) / d + 2
+      else h = (r - g) / d + 4
+      h *= 60
+      if (h < 0) h += 360
+    }
+    const hit = buckets.find(
+      (bk) =>
+        bk.h >= 0 &&
+        Math.abs(bk.h - h) < 18 &&
+        Math.abs(bk.s - s) < 0.18 &&
+        Math.abs(bk.l - l) < 0.12
+    )
+    if (hit) {
+      hit.members.push(v)
+      hit.alphas.push(p.alpha)
+    } else {
+      buckets.push({ h, s, l, members: [v], alphas: [p.alpha] })
+    }
+  }
+  return buckets.map((bk) => ({
+    label:
+      bk.members.length > 1
+        ? `${bk.members[0]} (+${bk.members.length - 1} alpha/near)`
+        : bk.members[0],
+    members: bk.members
+  }))
 }
 
 function longestRun(arr: string[]): { role: string; count: number } {
@@ -503,13 +603,20 @@ export function scoreRun(findings: Finding[], pageCount: number, brutality: RunC
   const multiplier = brutality === 'ruthless' ? 1.35 : brutality === 'harsh' ? 1.0 : 0.75
   const categories = {} as Scorecard['categories']
   const cats: Category[] = ['coherence', 'variety', 'accessibility', 'responsive', 'flow', 'performance', 'content', 'craft']
+  const effortEase: Record<FindingEffort, number> = { 'one-line': 1.15, component: 1, redesign: 0.75 }
 
   for (const c of cats) {
     const list = findings.filter((f) => f.category === c)
-    const penalty = list.reduce((s, f) => s + SEVERITY_WEIGHT[f.severity], 0) * multiplier
+    const penalty =
+      list.reduce((s, f) => {
+        const reach = Math.min(2, 1 + Math.log10(Math.max(1, f.affectedPages ?? 1)))
+        const ease = effortEase[f.effort ?? guessEffort(f)]
+        // Reach amplifies; hard redesigns weigh less toward the grade so a one-line
+        // AA failure still outranks a mobile IA redesign in “Start here” — severity
+        // stays on the finding; this only shapes score pressure.
+        return s + SEVERITY_WEIGHT[f.severity] * reach * ease
+      }, 0) * multiplier
     const budget = CATEGORY_BUDGET[c] * Math.max(1, pageCount * 0.5)
-    // Sub-linear: the first problems cost the most, and a very bad page still
-    // scores above a hopeless one instead of both showing 0.
     const ratio = penalty / budget
     const score = Math.max(2, Math.round(100 * Math.exp(-ratio)))
     categories[c] = { score, findings: list.length }
@@ -562,4 +669,43 @@ export function themeSummary(pages: CapturedPage[]): string {
     `Dominant colours: ${top(colors, 6).join(', ') || 'n/a'}`,
     `Radii: ${top(radii, 4).join(', ') || 'none'}`
   ].join(' · ')
+}
+
+/** Order for “Start here”: easy wins with reach before redesigns. */
+export function sortFindingsForBrief(findings: Finding[]): Finding[] {
+  const sev: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
+  const effortRank: Record<FindingEffort, number> = { 'one-line': 0, component: 1, redesign: 2 }
+  return [...findings].sort((a, b) => {
+    const ea = effortRank[a.effort ?? guessEffort(a)]
+    const eb = effortRank[b.effort ?? guessEffort(b)]
+    if (ea !== eb) return ea - eb
+    const sa = sev.indexOf(a.severity)
+    const sb = sev.indexOf(b.severity)
+    if (sa !== sb) return sa - sb
+    return (b.affectedPages ?? 1) - (a.affectedPages ?? 1)
+  })
+}
+
+/** Attach new/fixed/regressed vs a prior run's findings. */
+export function diffFindingsAgainstPrior(current: Finding[], prior: Finding[]): Finding[] {
+  const shape = (f: Finding): string =>
+    [f.category, f.title.replace(/\d+(\.\d+)?%?/g, '#'), f.selector ?? ''].join('|')
+  const priorShapes = new Set(prior.map(shape))
+  const currentShapes = new Set(current.map(shape))
+  const out = current.map((f) => ({
+    ...f,
+    delta: (priorShapes.has(shape(f)) ? 'unchanged' : 'new') as Finding['delta']
+  }))
+  // Fixed findings are not in current — caller may surface separately.
+  void currentShapes
+  return out
+}
+
+export function fixedFindingsSincePrior(current: Finding[], prior: Finding[]): Finding[] {
+  const shape = (f: Finding): string =>
+    [f.category, f.title.replace(/\d+(\.\d+)?%?/g, '#'), f.selector ?? ''].join('|')
+  const currentShapes = new Set(current.map(shape))
+  return prior
+    .filter((f) => !currentShapes.has(shape(f)))
+    .map((f) => ({ ...f, delta: 'fixed' as const }))
 }

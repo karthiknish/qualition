@@ -10,6 +10,7 @@
  * signed-in SPAs are audited as the user sees them.
  */
 import type { Finding, Severity } from '../../shared/types.js'
+import { importChromeLauncher } from './chromeDeps.js'
 import { cookieHeaderFor, seedChromeViaCdp } from './sessionSeed.js'
 
 export { cookieHeaderFor }
@@ -57,7 +58,7 @@ export async function runPa11y(
     // Full session (cookies + localStorage): seed a chrome-launcher instance and
     // tell pa11y to reuse it via puppeteer-core connect.
     if (opts.storageStatePath) {
-      const { launch } = await import('chrome-launcher')
+      const { launch } = await importChromeLauncher()
       const puppeteer = await import('puppeteer-core')
       const launched = await launch({
         chromeFlags: ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage']

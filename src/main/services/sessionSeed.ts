@@ -51,6 +51,10 @@ function originFor(url: string, state: StorageStateFile): string {
 /**
  * Connect to a chrome-launcher / CDP endpoint, inject cookies + localStorage,
  * then disconnect. Call before Lighthouse/pa11y with `disableStorageReset`.
+ *
+ * Also installs the Agentation/dev-chrome hide guard so those tools do not
+ * invent button-name findings for debug toolbars the Playwright crawl already
+ * excludes.
  */
 export async function seedChromeViaCdp(
   cdpUrl: string,
@@ -81,6 +85,14 @@ export async function seedChromeViaCdp(
     }
 
     const page = context.pages()[0] ?? (await context.newPage())
+    // Persist across Lighthouse/pa11y navigations in this Chrome instance.
+    try {
+      const { installDevChromeGuard } = await import('./devChrome.js')
+      await installDevChromeGuard(page)
+    } catch {
+      /* optional — crawl path still covers the main audit */
+    }
+
     const origin = originFor(pageUrl, state)
     await page.goto(origin, { waitUntil: 'domcontentloaded', timeout: 30_000 })
 
@@ -104,6 +116,12 @@ export async function seedChromeViaCdp(
     // Touch the real target once so any path-scoped cookies settle.
     if (pageUrl !== origin) {
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
+    }
+    try {
+      const { hideDevChrome } = await import('./devChrome.js')
+      await hideDevChrome(page)
+    } catch {
+      /* ignore */
     }
   } finally {
     // Disconnect only — do not kill chrome-launcher's process.

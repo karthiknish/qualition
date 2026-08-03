@@ -10,6 +10,7 @@
  * localStorage) with disableStorageReset — Cookie headers alone miss SPA auth.
  */
 import type { Finding, Severity } from '../../shared/types.js'
+import { importChromeLauncher } from './chromeDeps.js'
 import { seedChromeViaCdp } from './sessionSeed.js'
 
 export interface LighthouseScores {
@@ -89,7 +90,7 @@ export async function runLighthouse(
 ): Promise<LighthouseResult | null> {
   let chrome: { kill: () => Promise<void>; port: number } | null = null
   try {
-    const { launch } = await import('chrome-launcher')
+    const { launch } = await importChromeLauncher()
     const lighthouseMod: any = await import('lighthouse')
     const lighthouse = lighthouseMod.default ?? lighthouseMod
 

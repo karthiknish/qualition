@@ -42,6 +42,9 @@ export const extractFn = function (): any {
         cur.hasAttribute('data-feedback-toolbar') ||
         cur.hasAttribute('data-annotation-popup') ||
         cur.hasAttribute('data-annotation-marker') ||
+        cur.hasAttribute('data-agentation-root') ||
+        cur.hasAttribute('data-agentation-toolbar') ||
+        cur.hasAttribute('data-agentation-settings-panel') ||
         cur.hasAttribute('data-vercel-toolbar') ||
         cur.hasAttribute('data-nextjs-toast') ||
         cur.hasAttribute('data-nextjs-dialog') ||
@@ -54,7 +57,7 @@ export const extractFn = function (): any {
       const id = (cur.id || '').toLowerCase()
       if (id.includes('agentation') || id === 'react-scan-root' || id === '__stagewise_container') return true
       const cls = typeof (cur as HTMLElement).className === 'string' ? (cur as HTMLElement).className.toLowerCase() : ''
-      if (cls.includes('agentation')) return true
+      if (cls.includes('agentation') || cls.includes('falnor-agentation')) return true
       if (cur.tagName.toLowerCase() === 'nextjs-portal') return true
       cur = cur.parentElement
     }
@@ -634,8 +637,14 @@ export const extractFn = function (): any {
       testId: el.getAttribute('data-testid') ?? el.getAttribute('data-test-id') ?? ''
     })
   }
-  const imagesMissingAlt = Array.from(document.querySelectorAll('img')).filter(
-    (i) => !i.getAttribute('alt') && !i.getAttribute('aria-hidden')
+  const imagesMissingAlt = Array.from(document.querySelectorAll('img')).filter((i) => {
+    if (isDevChrome(i) || !isVisible(i)) return false
+    // alt="" is a correct decorative marking — only *missing* alt is a defect.
+    if (!i.hasAttribute('alt')) return true
+    return false
+  }).length
+  const imagesDecorativeOk = Array.from(document.querySelectorAll('img')).filter(
+    (i) => !isDevChrome(i) && isVisible(i) && i.getAttribute('alt') === ''
   ).length
   const h1Count = document.querySelectorAll('h1').length
   const headingOrderIssues = (() => {
@@ -736,6 +745,7 @@ export const extractFn = function (): any {
     controls,
     signals: {
       imagesMissingAlt,
+      imagesDecorativeOk,
       h1Count,
       headingOrderIssues,
       focusableWithoutOutline,
@@ -746,11 +756,43 @@ export const extractFn = function (): any {
       title: document.title,
       metaDescription:
         (document.querySelector('meta[name=description]') as HTMLMetaElement | null)?.content ?? null,
-      hasSkipLink: !!document.querySelector('a[href^="#"][class*=skip], a[href="#main"]'),
+      hasSkipLink: !!document.querySelector(
+        'a[href^="#"][class*=skip i], a[href="#main"], a[href="#content"], a.skip-to-content, a[href="#app"]'
+      ),
+      // Must skip Agentation / Vercel toolbar / etc. — they stay in the DOM
+      // after hideDevChrome (display:none) and would otherwise inflate this
+      // count into a false "icon-only buttons" finding on every page.
       buttonsWithoutLabel: Array.from(document.querySelectorAll('button')).filter(
-        (b) => !(b.textContent ?? '').trim() && !b.getAttribute('aria-label')
+        (b) =>
+          !isDevChrome(b) &&
+          isVisible(b) &&
+          !(b.textContent ?? '').trim() &&
+          !b.getAttribute('aria-label') &&
+          !b.getAttribute('title')
       ).length
     },
+    buildContext: (() => {
+      const hints: string[] = []
+      const scripts = Array.from(document.scripts).map((s) => s.src || '')
+      const hrefs = Array.from(document.querySelectorAll('link[rel=stylesheet]')).map(
+        (l) => (l as HTMLLinkElement).href || ''
+      )
+      const all = scripts.concat(hrefs).join('\n')
+      if (/\/@vite\/client|\/\.vite\/|@fs\//i.test(all)) hints.push('vite-client')
+      if (/@react-refresh|react-refresh/i.test(all)) hints.push('react-refresh')
+      if (/_next\/static/i.test(all) && /localhost|127\.0\.0\.1/.test(location.host)) hints.push('next-dev')
+      try {
+        if ((window as any).__vite_plugin_react_preamble_installed__) hints.push('vite-hmr')
+      } catch {
+        /* ignore */
+      }
+      const host = (location.hostname || '').toLowerCase()
+      const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.local')
+      let buildMode: 'development' | 'production' | 'unknown' = 'unknown'
+      if (hints.length > 0 || isLocal) buildMode = 'development'
+      else buildMode = 'production'
+      return { buildMode, isLocalTarget: isLocal, buildHints: hints }
+    })(),
     perf
   }
 }
