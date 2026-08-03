@@ -1,0 +1,104 @@
+name: Auto release
+
+# After CI succeeds on main, publish a GitHub Release so electron-updater
+# can see it. Patch-bumps when the current package version is already tagged;
+# otherwise tags the version that was bumped in the commit.
+#
+# Include [skip-release] in a commit message to skip (also added on the bot
+# chore(release) commit so the version-bump push does not loop).
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: auto-release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-publish:
+    name: Bump · tag · publish
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch tags
+        run: git fetch --tags --force
+
+      - name: Bump version and create tag if needed
+        id: bump
+        run: |
+          set -euo pipefail
+          MSG=$(git log -1 --pretty=%B)
+          if echo "$MSG" | grep -qi '\[skip-release\]'; then
+            echo "Commit requests skip-release — exiting."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/bump-and-tag.mjs
+          if [ ! -f .release-version ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          VERSION=$(tr -d '[:space:]' < .release-version)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+
+      - name: Push release commit and tag
+        if: steps.bump.outputs.skipped != 'true'
+        run: |
+          git push origin HEAD:main
+          git push origin "v${{ steps.bump.outputs.version }}"
+
+      - name: Compile main, preload and renderer
+        if: steps.bump.outputs.skipped != 'true'
+        run: npm run build
+
+      - name: Verify entry points exist before packaging
+        if: steps.bump.outputs.skipped != 'true'
+        run: |
+          test -f out/main/index.js || { echo "::error::out/main/index.js missing"; exit 1; }
+          test -f out/preload/index.mjs || { echo "::error::out/preload/index.mjs missing"; exit 1; }
+          test -f out/renderer/index.html || { echo "::error::out/renderer/index.html missing"; exit 1; }
+
+      - name: Package and publish to GitHub Releases
+        if: steps.bump.outputs.skipped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npx electron-builder --mac --publish always
+
+      - name: Summarise
+        if: steps.bump.outputs.skipped != 'true'
+        run: |
+          {
+            echo "### Auto-released v${{ steps.bump.outputs.version }}"
+            echo ""
+            ls -lh release/*.dmg release/*.zip 2>/dev/null | awk '{print "- " $9 " (" $5 ")"}' || true
+          } >> "$GITHUB_STEP_SUMMARY"

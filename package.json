@@ -18,7 +18,9 @@
     "dist:dir": "node scripts/bundle-browsers.mjs && electron-vite build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --dir",
     "release": "npm run typecheck && npm test && npm version",
     "release:patch": "npm run typecheck && npm test && npm version patch && git push --follow-tags",
-    "release:minor": "npm run typecheck && npm test && npm version minor && git push --follow-tags"
+    "release:minor": "npm run typecheck && npm test && npm version minor && git push --follow-tags",
+    "release:auto": "node scripts/bump-and-tag.mjs",
+    "release:auto:push": "GIT_PUSH=1 node scripts/bump-and-tag.mjs"
   },
   "dependencies": {
     "@axe-core/playwright": "^4.12.1",

@@ -1,7 +1,7 @@
+# Tag-driven releases (manual `git push origin vX.Y.Z`).
+# Pushes to main are released automatically by auto-release.yml after CI.
 name: Release
 
-# Tag-driven releases. The CI gate runs first and the build job depends on it,
-# so a tag can never publish something that does not typecheck, test and build.
 on:
   push:
     tags: ['v*.*.*']
