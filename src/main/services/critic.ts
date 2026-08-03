@@ -17,11 +17,18 @@ import type {
   Severity
 } from '../../shared/types.js'
 import { createProvider, extractJson, type Provider, type ImageInput } from './providers.js'
+import {
+  findingsFromAiPremiumScores,
+  type PremiumDimensionScores
+} from './premiumCraft.js'
 
 const PERSONA = `You are Qualition's principal design critic. You have shipped and killed a lot of interfaces.
 You are blunt, specific and evidence-driven. You never praise generically, never hedge, and never invent details you cannot see in the evidence.
 You care, in order: (1) does the interface communicate hierarchy in one glance, (2) is the visual system coherent — one type scale, one spacing rhythm, one radius language, one colour semantic, (3) is there enough *variety* that the page has rhythm rather than being an endless stack of identical slabs, (4) does the flow remove friction — including the states most teams forget: hover, focus, disabled, loading, empty, error, (5) craft details: alignment, optical spacing, contrast, focus states.
-When reference imagery from Mobbin is supplied, compare against it concretely: what the reference does structurally that this does not.`
+When reference imagery from Mobbin is supplied, compare against it concretely: what the reference does structurally that this does not.
+AI-SLOP BAN (impeccable.style): flag purple/violet gradients, cyan-on-dark neon, cream/beige default surfaces, Inter/Geist/Roboto as the whole personality, gradient text, side colour accents on cards/sections/list items (no coloured left/right edge stripes), nested cards, icon-tile-above-heading feature grids, hero eyebrow pills, bounce/elastic easing, colored glow shadows, decorative pulsing dots. Prefer distinctive type and intentional palette over fake depth.
+FOCUS CRAFT: when calling for a focus indicator, require :focus-visible only — soft offset ring/outline via tokens. Ban thick border-on-:focus or border-on-:active “rings” that leave a harsh pressed look for mouse users.
+PREMIUM BAR: grade visual craft against Linear/Stripe — clear hierarchy (size+weight+contrast), 6–8 step type scale, 8px spacing rhythm, intentional density, 1–3 elevation layers, one icon/border language, soft states. Score premiumScores 0–4 per dimension; write premiumVerdict in one blunt sentence.`
 
 const findingSchema = {
   type: 'object',
@@ -45,9 +52,22 @@ const findingSchema = {
       }
     },
     themeRead: { type: 'string' },
-    verdict: { type: 'string' }
+    verdict: { type: 'string' },
+    premiumScores: {
+      type: 'object',
+      properties: {
+        hierarchy: { type: 'number' },
+        typography: { type: 'number' },
+        spacing: { type: 'number' },
+        density: { type: 'number' },
+        elevation: { type: 'number' },
+        consistency: { type: 'number' },
+        distinctiveness: { type: 'number' }
+      }
+    },
+    premiumVerdict: { type: 'string' }
   },
-  required: ['findings']
+  required: ['findings', 'premiumScores']
 }
 
 function brutalityLine(b: RunConfig['brutality']): string {
@@ -121,7 +141,37 @@ function evidenceText(page: CapturedPage, interaction?: InteractionReport): stri
       `  keyboard: ${interaction.keyboard.tabStops} tab stops, positive tabindex ${interaction.keyboard.positiveTabIndex}`
     )
   }
+  const premium = (page.signals as { premium?: Record<string, unknown> } | undefined)?.premium
+  if (premium) {
+    lines.push(
+      `PREMIUM SIGNALS (measured — treat as facts for scoring): ${JSON.stringify(premium)}`
+    )
+  }
   return lines.join('\n')
+}
+
+function parsePremiumScores(raw: unknown): PremiumDimensionScores | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const o = raw as Record<string, unknown>
+  const keys: (keyof PremiumDimensionScores)[] = [
+    'hierarchy',
+    'typography',
+    'spacing',
+    'density',
+    'elevation',
+    'consistency',
+    'distinctiveness'
+  ]
+  const out = {} as PremiumDimensionScores
+  let n = 0
+  for (const k of keys) {
+    const v = Number(o[k])
+    if (Number.isFinite(v)) {
+      out[k] = Math.max(0, Math.min(4, v))
+      n++
+    }
+  }
+  return n >= 4 ? out : undefined
 }
 
 async function generateFindings(
@@ -131,7 +181,13 @@ async function generateFindings(
   prompt: string,
   images: ImageInput[],
   pageUrl: string
-): Promise<{ findings: Finding[]; themeRead?: string; verdict?: string }> {
+): Promise<{
+  findings: Finding[]
+  themeRead?: string
+  verdict?: string
+  premiumScores?: PremiumDimensionScores
+  premiumVerdict?: string
+}> {
   const text = await provider.generate(model, {
     system,
     prompt,
@@ -140,7 +196,13 @@ async function generateFindings(
     temperature: 0.4
   })
   const raw = extractJson(text) ?? { findings: [] }
-  return { findings: toFindings(raw, pageUrl), themeRead: raw.themeRead, verdict: raw.verdict }
+  return {
+    findings: toFindings(raw, pageUrl),
+    themeRead: raw.themeRead,
+    verdict: raw.verdict,
+    premiumScores: parsePremiumScores(raw.premiumScores),
+    premiumVerdict: raw.premiumVerdict ? String(raw.premiumVerdict).slice(0, 280) : undefined
+  }
 }
 
 /** Whole-page critique across viewports. */
@@ -150,7 +212,13 @@ export async function critiquePage(
   page: CapturedPage,
   config: RunConfig,
   interaction?: InteractionReport
-): Promise<{ findings: Finding[]; themeRead?: string; verdict?: string }> {
+): Promise<{
+  findings: Finding[]
+  themeRead?: string
+  verdict?: string
+  premiumScores?: PremiumDimensionScores
+  premiumVerdict?: string
+}> {
   const images: ImageInput[] = Object.entries(page.screenshots).map(([vp, path]) => ({
     path,
     caption: `Viewport: ${vp}`
@@ -163,9 +231,20 @@ ${provider.supportsVision ? `Full-page screenshots follow, one per viewport (${O
 MEASURED EVIDENCE (already verified by static analysis and by actually operating the UI — do not repeat it, build on it):
 ${evidenceText(page, interaction)}
 
-Return findings a static analyser could NOT produce: visual hierarchy failures, theme incoherence, monotony/rhythm problems, mismatched component vocabulary, missing interaction states, copy that undercuts the design, sections that look unfinished or templated. Attribute each finding to a sectionId when possible. Then give themeRead (one paragraph describing the actual design language: palette temperature, type personality, density, era) and verdict (3 sentences, brutal, specific).`
+Return findings a static analyser could NOT produce: visual hierarchy failures, theme incoherence, monotony/rhythm problems, mismatched component vocabulary, missing interaction states, copy that undercuts the design, sections that look unfinished or templated. Attribute each finding to a sectionId when possible.
+Also return premiumScores (0–4 each: hierarchy, typography, spacing, density, elevation, consistency, distinctiveness) against a Linear/Stripe bar — use PREMIUM SIGNALS as facts, do not invent font sizes — and premiumVerdict (one sentence).
+Then give themeRead (one paragraph describing the actual design language: palette temperature, type personality, density, era) and verdict (3 sentences, brutal, specific).`
 
-  return generateFindings(provider, model, PERSONA, prompt, images, page.url)
+  const res = await generateFindings(provider, model, PERSONA, prompt, images, page.url)
+  if (res.premiumScores) {
+    const extra = findingsFromAiPremiumScores(
+      page,
+      res.premiumScores,
+      res.findings.map((f) => f.title)
+    )
+    res.findings = [...res.findings, ...extra]
+  }
+  return res
 }
 
 /** Section-level critique against Mobbin reference imagery. */
@@ -249,13 +328,15 @@ HARD RULES — a flow that breaks any of these will be discarded:
 - click targets MUST use a label copied EXACTLY from that route's "clickable" list, as "text=<label>".
 - fill targets MUST use a handle copied EXACTLY from that route's "fields" list ("placeholder=…", "label=…" or a [name=…] selector).
 - assertText values MUST be distinctive visible copy from the inventory — never "body", "html", "page", or "content".
+- NEVER assertText a field placeholder (e.g. "Search tasks…") — placeholders disappear after fill and cause false failures. Assert a result heading, empty-state message, or detail title instead.
+- NEVER assertText soft-404 / missing-record copy ("not found", "no run at this address", "not on this desk"). Landing there means the journey failed.
 - if a route has no fields, do not propose a form flow for it.
 - never pay, purchase, delete, or create a real account; use qualition+test@example.com for any email field.
 - 5–12 steps per flow, ending with an assertText that proves the journey worked.
 
 WHAT MAKES A GOOD FLOW HERE: go *deep* into the product. Prefer journeys that:
 1. Open a list/index route, then goto a nested detail/ID route from the inventory (e.g. /tasks → /tasks/<id>), assert the detail, interact with a control there.
-2. Fill a real field, assert something changed, then navigate onward.
+2. Fill a real field, then assert an *outcome* (filtered list, empty state CTA, detail title) — never re-assert the placeholder you just typed into.
 3. Chain 3+ clicks with an assertText after each so a dead control is caught at the exact step.
 4. When possible, mirror steps common in polished product flows: search→open, confirm before submit, land on success feedback.
 

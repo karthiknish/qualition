@@ -12,6 +12,8 @@ import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
 import { DEV_CHROME_EXCLUDE_LIST, hideDevChrome, installDevChromeGuard } from './devChrome.js'
 import { configurePlaywrightBrowsersPath } from './browsers.js'
+import { looksLikeSoft404 } from './brokenUi.js'
+import { isDetailPath } from './componentGaps.js'
 import { normalizeTargetUrl, schemeFallback, isIgnoredPage } from '../../shared/url.js'
 import type {
   AxeViolation,
@@ -231,6 +233,9 @@ export async function capturePage(
       } catch {
         /* long-poll sites never idle */
       }
+      // Wait out SPA "Connecting…" / skeleton shells before capture — otherwise
+      // we grade a hang as a finished product page.
+      await waitForCaptureReady(page)
       // App shells scroll inside overflow panes (not document). Sweep those so
       // lazy rows hydrate and detail cards exist before we screenshot/extract.
       await scrollAppShells(page)
@@ -853,7 +858,13 @@ export async function runFlow(
     } catch (e) {
       const msg = (e as Error).message.slice(0, 300)
       const outcome =
-        /timeout|waiting for/i.test(msg) ? ('timeout' as const) : /not found|no element|strict mode/i.test(msg) ? ('absent' as const) : ('error' as const)
+        /soft-404/i.test(msg)
+          ? ('error' as const)
+          : /timeout|waiting for/i.test(msg)
+            ? ('timeout' as const)
+            : /not found|no element|strict mode/i.test(msg)
+              ? ('absent' as const)
+              : ('error' as const)
       ok = false
       const shot = join(outDir, `flow-${flow.name.replace(/\W+/g, '_')}-${i}-FAIL.png`)
       try {
@@ -890,13 +901,13 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
   switch (step.action) {
     case 'goto':
       await page.goto(new URL(step.target ?? '/', baseUrl).toString(), { waitUntil: 'domcontentloaded', timeout: 30_000 })
-      // Give client-rendered views a chance to paint before the next step.
-      await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
-      await page.waitForTimeout(500)
+      await waitForPageReady(page)
+      await assertNotSoft404(page)
       return
     case 'click':
       await clickResiliently(page, step.target!, timeout)
       await page.waitForTimeout(700)
+      await assertNotSoft404(page)
       return
     case 'fill': {
       const loc = resolve(page, step.target!).first()
@@ -916,6 +927,8 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
         return
       }
       await loc.fill(step.value ?? '', { timeout })
+      // Search/filter fills often kick off a fetch — wait for skeletons to clear.
+      await waitForPageReady(page, { allowSkeleton: false, timeoutMs: 6000 }).catch(() => {})
       return
     }
     case 'press':
@@ -932,11 +945,15 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
     case 'assertText': {
       const needle = step.value ?? step.target ?? ''
       if (!needle) throw new Error('assertText step has no text to assert')
-      // waitFor polls until the timeout; isVisible() answers immediately and
-      // therefore reports "missing" for anything that renders just after
-      // navigation — producing false "this journey is broken" findings.
+      // Prefer main content so a sidebar brand/nav label does not fake the assert.
+      const scoped = page.locator('main, [role=main]').getByText(needle, { exact: false })
+      const anywhere = page.getByText(needle, { exact: false })
       try {
-        await page.getByText(needle, { exact: false }).first().waitFor({ state: 'visible', timeout })
+        if ((await scoped.count()) > 0) {
+          await scoped.first().waitFor({ state: 'visible', timeout })
+        } else {
+          await anywhere.first().waitFor({ state: 'visible', timeout })
+        }
       } catch {
         throw new Error(`text not visible after ${timeout}ms: ${needle}`)
       }
@@ -946,22 +963,186 @@ async function execStep(page: Page, step: FlowStep, baseUrl: string): Promise<vo
 }
 
 /**
+ * SPA routes often paint a skeleton shell under domcontentloaded/networkidle.
+ * Counting that as a successful goto is how every flow went green on blank pages.
+ */
+async function waitForPageReady(
+  page: Page,
+  opts: { allowSkeleton?: boolean; timeoutMs?: number } = {}
+): Promise<void> {
+  await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
+  const timeoutMs = opts.timeoutMs ?? 8000
+  const allowSkeleton = opts.allowSkeleton ?? false
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const state = await page
+      .evaluate(() => {
+        const main = document.querySelector('main, [role=main]') || document.body
+        const text = (main.textContent || '').replace(/\s+/g, ' ').trim()
+        const skeletons = main.querySelectorAll(
+          '[class*=skeleton i], [class*=Skeleton], .animate-pulse, [aria-busy=true], [data-loading]'
+        ).length
+        const head = text.slice(0, 280)
+        const connecting = /\b(connecting|still loading|please wait)\b/i.test(head)
+        return { textLen: text.length, skeletons, connecting }
+      })
+      .catch(() => ({ textLen: 0, skeletons: 99, connecting: true }))
+    if (state.textLen >= 40 && !state.connecting && (allowSkeleton || state.skeletons <= 2)) return
+    await page.waitForTimeout(250)
+  }
+  const final = await page
+    .evaluate(() => {
+      const main = document.querySelector('main, [role=main]') || document.body
+      const text = (main.textContent || '').replace(/\s+/g, ' ').trim()
+      const skeletons = main.querySelectorAll(
+        '[class*=skeleton i], [class*=Skeleton], .animate-pulse, [aria-busy=true], [data-loading]'
+      ).length
+      const connecting = /\b(connecting|still loading|please wait)\b/i.test(text.slice(0, 280))
+      return { textLen: text.length, skeletons, sample: text.slice(0, 80), connecting }
+    })
+    .catch(() => ({ textLen: 0, skeletons: 99, sample: '', connecting: true }))
+  if (!allowSkeleton && final.connecting && final.skeletons >= 3) {
+    throw new Error(
+      `page still connecting (${final.skeletons} placeholders): ${final.sample}`
+    )
+  }
+  if (!allowSkeleton && final.skeletons >= 4 && final.textLen < 120) {
+    throw new Error(
+      `page still skeleton-loading (${final.skeletons} placeholders, ${final.textLen} chars of text)`
+    )
+  }
+}
+
+/**
+ * Soft wait during capture: prefer a settled UI, but still screenshot if the
+ * SPA hangs — audit heuristics then flag stuck Connecting/skeleton states.
+ */
+async function waitForCaptureReady(page: Page, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const state = await page
+      .evaluate(() => {
+        const main = document.querySelector('main, [role=main]') || document.body
+        const text = (main.innerText || main.textContent || '').replace(/\s+/g, ' ').trim()
+        const skeletons = main.querySelectorAll(
+          '[class*=skeleton i], [class*=Skeleton], .animate-pulse, [aria-busy=true], [data-loading]'
+        ).length
+        const head = text.slice(0, 280)
+        const connecting = /\b(connecting|still loading|please wait)\b/i.test(head)
+        return { skeletons, connecting, textLen: text.length }
+      })
+      .catch(() => ({ skeletons: 0, connecting: false, textLen: 0 }))
+    if (!state.connecting && state.skeletons <= 3) return
+    // Enough real copy + few skeletons = good enough even if "loading" appears in docs.
+    if (!state.connecting && state.textLen > 400 && state.skeletons <= 8) return
+    await page.waitForTimeout(300)
+  }
+}
+
+/**
+ * Soft-404 shells (HTTP 200 + “not found” / “no run at this address”) look
+ * “ready” to waitForPageReady because they have real copy. Fail the step when
+ * a detail/id URL lands on one — otherwise flows go green on dead records.
+ */
+async function assertNotSoft404(page: Page): Promise<void> {
+  const info = await page
+    .evaluate(() => {
+      const root =
+        (document.querySelector('main, [role=main]') as HTMLElement) ||
+        (document.querySelector('[data-testid*=content i], [class*=page-content i], [class*=main-content i]') as HTMLElement) ||
+        document.body
+      const clone = root.cloneNode(true) as HTMLElement
+      for (const n of Array.from(
+        clone.querySelectorAll('nav, aside, [role=navigation], [role=complementary], header, footer, [data-sidebar]')
+      )) {
+        n.remove()
+      }
+      const mainText = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim()
+      const h1 = Array.from(document.querySelectorAll('h1'))
+        .map((h) => (h.textContent || '').trim())
+        .filter(Boolean)
+        .join(' · ')
+      const actions = root.querySelectorAll('a[href], button, [role=button]').length
+      return {
+        path: location.pathname,
+        title: document.title || '',
+        h1,
+        sample: mainText.slice(0, 500),
+        chars: mainText.length,
+        actions
+      }
+    })
+    .catch(() => null)
+  if (!info) return
+  if (!isDetailPath(info.path)) return
+  const headingSoft = looksLikeSoft404(info.h1) || looksLikeSoft404(info.title)
+  const blob = `${info.h1}\n${info.title}\n${info.sample}`
+  if (!looksLikeSoft404(blob)) return
+  // Heading soft-404 wins; otherwise require a short content shell.
+  if (!headingSoft && (info.chars >= 900 || info.actions > 8)) return
+  const evidence = [info.h1, info.title, info.sample].find((t) => looksLikeSoft404(t)) || info.sample.slice(0, 80)
+  throw new Error(`detail route soft-404: ${evidence.slice(0, 120)}`)
+}
+
+/**
  * Text selectors match the deepest node containing the text, which in a
  * component library is usually a decorative <span> inside the real control.
  * Playwright then waits for that span to become "stable and enabled" and times
  * out even though the button beside it is perfectly clickable. So: try the
  * match, then its nearest clickable ancestor, then a forced click.
+ *
+ * Also: prefer interactive controls outside nav/aside when multiple text
+ * matches exist — otherwise `text=Falnor` / `text=Overview` hit the sidebar
+ * and the step still reports ok.
  */
 async function clickResiliently(page: Page, target: string, timeout: number): Promise<void> {
-  const primary = resolve(page, target)
   const half = Math.max(1500, Math.round(timeout / 2))
 
+  if (target.startsWith('text=')) {
+    const text = target.slice(5)
+    const interactive = page.locator(
+      'a, button, [role=button], [role=link], [role=tab], [role=menuitem], summary, [role=option]'
+    )
+    const matches = interactive.filter({ hasText: text })
+    const n = await matches.count().catch(() => 0)
+    const ranked: { idx: number; chrome: boolean }[] = []
+    for (let i = 0; i < Math.min(n, 10); i++) {
+      const chrome = await matches
+        .nth(i)
+        .evaluate((node) => {
+          return !!node.closest(
+            'nav, aside, [role=navigation], header, [class*=sidebar i], [class*=side-nav i], [class*=SideNav i]'
+          )
+        })
+        .catch(() => true)
+      ranked.push({ idx: i, chrome })
+    }
+    const order = [
+      ...ranked.filter((r) => !r.chrome).map((r) => r.idx),
+      ...ranked.filter((r) => r.chrome).map((r) => r.idx)
+    ]
+    // Prefer in-page controls; fall back to nav/sidebar only when nothing else matches.
+    for (const i of order) {
+      try {
+        await matches.nth(i).click({ timeout: half })
+        return
+      } catch {
+        /* try next candidate */
+      }
+    }
+  }
+
+  const primary = resolve(page, target)
   try {
     await primary.click({ timeout: half })
     return
   } catch (directError) {
     // The nearest interactive ancestor is what a user actually clicks.
-    const ancestor = primary.locator('xpath=ancestor-or-self::*[self::a or self::button or self::summary or @role="button" or @role="link" or @role="tab" or @role="menuitem"][1]').first()
+    const ancestor = primary
+      .locator(
+        'xpath=ancestor-or-self::*[self::a or self::button or self::summary or @role="button" or @role="link" or @role="tab" or @role="menuitem"][1]'
+      )
+      .first()
     try {
       if (await ancestor.count()) {
         await ancestor.click({ timeout: half })
@@ -984,7 +1165,11 @@ async function clickResiliently(page: Page, target: string, timeout: number): Pr
 }
 
 function resolve(page: Page, target: string) {
-  if (target.startsWith('text=')) return page.getByText(target.slice(5), { exact: false }).first()
+  if (target.startsWith('text=')) {
+    // Prefer main-content text matches so sidebar duplicates do not win.
+    const text = target.slice(5)
+    return page.locator('main, [role=main]').getByText(text, { exact: false }).or(page.getByText(text, { exact: false })).first()
+  }
   if (target.startsWith('role=')) {
     const [role, name] = target.slice(5).split(':')
     return page.getByRole(role as any, name ? { name } : undefined).first()

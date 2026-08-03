@@ -908,6 +908,15 @@ export const extractFn = function (): any {
     if (input.disabled && el.getAttribute('aria-disabled') !== 'true') disabledWithoutAria++
   }
 
+  // Stuck SPA shells: "Connecting…" / "Loading…" with rows of skeletons still on screen.
+  const polishRoot =
+    (document.querySelector('main, [role=main]') as HTMLElement) || document.body
+  const polishText = (polishRoot.innerText || polishRoot.textContent || '').replace(/\s+/g, ' ').trim()
+  const connectingCopy = /\b(connecting|still loading|please wait|loading[.…]*$)\b/i.test(
+    polishText.slice(0, 280)
+  )
+  const stuckLoading = connectingCopy && skeletonCount >= 4
+
   const polish = {
     emptyRegionsWithoutCta,
     vagueEmptyCopy: [...new Set(vagueEmptyCopy)].slice(0, 8),
@@ -915,7 +924,375 @@ export const extractFn = function (): any {
     skeletonCount,
     skeletonWithoutMinHeight,
     ariaBusyCount,
-    disabledWithoutAria
+    disabledWithoutAria,
+    connectingCopy,
+    stuckLoading
+  }
+
+  /* ---------------- broken / soft-404 / overflow UI ---------------------- */
+  const SOFT_404 =
+    /\b(not found|no [^\n.]{0,40} at this address|does(?:\s*not|n't) exist|page not found|could(?:\s*not|n't) find|nothing (here|to show)|no longer available|unknown (run|record|item|id|trace|task)|invalid (run|id|link|url)|was deleted|has been removed|no (run|record|task|item|trace|agent|page) (here|found|at|with)|can't find|cannot find|not on this desk|is not on this)\b/i
+  const mainEl =
+    (document.querySelector('main, [role=main]') as HTMLElement) ||
+    (document.querySelector('[data-testid*=content i], [class*=page-content i], [class*=main-content i]') as HTMLElement) ||
+    document.body
+  const stripChromeText = (root: HTMLElement): string => {
+    const clone = root.cloneNode(true) as HTMLElement
+    for (const n of Array.from(
+      clone.querySelectorAll('nav, aside, [role=navigation], [role=complementary], header, footer, [data-sidebar]')
+    )) {
+      n.remove()
+    }
+    return (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim()
+  }
+  const mainText = stripChromeText(mainEl)
+  const h1Text = Array.from(document.querySelectorAll('h1'))
+    .map((h) => (h.textContent || '').trim())
+    .filter(Boolean)
+    .join(' · ')
+  const titleText = document.title || ''
+  const softCandidates = [h1Text, titleText, mainText.slice(0, 500)]
+  const soft404Evidence = softCandidates.find((t) => SOFT_404.test(t)) || ''
+  const mainActions = mainEl.querySelectorAll('a[href], button, [role=button]').length
+  // An h1/title soft-404 is authoritative — SPA chrome around it often makes body text long.
+  const headingSoft = SOFT_404.test(h1Text) || SOFT_404.test(titleText)
+  const soft404 = !!(
+    soft404Evidence &&
+    (headingSoft || (mainText.length < 900 && mainActions <= 8))
+  )
+
+  let clippedTextNodes = 0
+  for (const el of Array.from(mainEl.querySelectorAll('*'))
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 900)) {
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    if (text.length < 2) continue
+    // Prefer near-leaves so parents don't double-count every clipped child.
+    const childText = Array.from(el.children).some((c) => ((c.textContent || '').trim().length > 0))
+    if (childText && el.children.length > 2) continue
+    const cs = getComputedStyle(el)
+    const cw = (el as HTMLElement).clientWidth
+    const ch = (el as HTMLElement).clientHeight
+    const sw = (el as HTMLElement).scrollWidth
+    const sh = (el as HTMLElement).scrollHeight
+    if (cw >= 8 && sw > cw + 4) clippedTextNodes++
+    else if (
+      ch >= 8 &&
+      sh > ch + 4 &&
+      cs.overflowY !== 'auto' &&
+      cs.overflowY !== 'scroll' &&
+      cs.overflow !== 'auto' &&
+      cs.overflow !== 'scroll'
+    ) {
+      clippedTextNodes++
+    }
+  }
+
+  let overlappingTextPairs = 0
+  const textBoxes: { el: Element; r: DOMRect }[] = []
+  for (const el of Array.from(
+    mainEl.querySelectorAll('span, p, h1, h2, h3, h4, h5, h6, label, td, th, li, time, code, small')
+  )
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 220)) {
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    if (t.length < 1) continue
+    const r = el.getBoundingClientRect()
+    if (r.width < 4 || r.height < 4 || r.width > 900) continue
+    const hasTextChild = Array.from(el.children).some((c) => {
+      const cr = c.getBoundingClientRect()
+      return (c.textContent || '').trim().length > 0 && cr.height > 2
+    })
+    if (hasTextChild) continue
+    textBoxes.push({ el, r })
+  }
+  for (let i = 0; i < Math.min(textBoxes.length, 120); i++) {
+    for (let j = i + 1; j < Math.min(textBoxes.length, 120); j++) {
+      const a = textBoxes[i]
+      const b = textBoxes[j]
+      if (a.el.contains(b.el) || b.el.contains(a.el)) continue
+      const ox = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left)
+      const oy = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top)
+      if (ox > 6 && oy > 6 && ox * oy > 80) overlappingTextPairs++
+    }
+  }
+
+  const brokenUi = {
+    soft404,
+    soft404Evidence: soft404Evidence.slice(0, 160) || undefined,
+    clippedTextNodes,
+    overlappingTextPairs,
+    mainContentChars: mainText.length
+  }
+
+  /* ---------------- premium craft signals (Linear/Stripe bar) ------------- */
+  const sizeUsage = new Map<number, number>()
+  const weightUsage = new Map<number, number>()
+  const lineHeights: number[] = []
+  let headingMaxSizePx = 0
+  let headingMaxWeight = 400
+  const iconSizes: number[] = []
+  const cardShadows = new Set<string>()
+  const borderWidths = new Set<number>()
+  let harshControlBorders = 0
+  let cardPadSum = 0
+  let cardPadN = 0
+  let contentBoxArea = 0
+
+  const premiumScope = Array.from(mainEl.querySelectorAll('*'))
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 400)
+
+  for (const el of premiumScope) {
+    const text = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    const cs = getComputedStyle(el)
+    const r = el.getBoundingClientRect()
+    const tag = el.tagName.toLowerCase()
+
+    if (text.length >= 1 && r.width > 4 && r.height > 4) {
+      const hasTextChild = Array.from(el.children).some((c) => ((c.textContent || '').trim().length > 0))
+      if (!hasTextChild || el.children.length <= 1) {
+        const size = Math.round(parseFloat(cs.fontSize) || 0)
+        const weight = parseInt(cs.fontWeight, 10) || 400
+        if (size >= 10 && size <= 96) {
+          sizeUsage.set(size, (sizeUsage.get(size) ?? 0) + Math.min(text.length, 40))
+          weightUsage.set(weight, (weightUsage.get(weight) ?? 0) + 1)
+          const lh = parseFloat(cs.lineHeight)
+          if (Number.isFinite(lh) && size > 0) {
+            const ratio = lh > 4 ? lh / size : lh
+            if (ratio >= 0.8 && ratio <= 3) lineHeights.push(ratio)
+          }
+        }
+        if (/^h[1-3]$/.test(tag) || (cs.fontSize && parseFloat(cs.fontSize) >= 22 && weight >= 600)) {
+          if (size > headingMaxSizePx) {
+            headingMaxSizePx = size
+            headingMaxWeight = weight
+          }
+        }
+        contentBoxArea += Math.min(r.width * r.height, 120_000)
+      }
+    }
+
+    if (tag === 'svg' || /icon/i.test(typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className : '')) {
+      const w = Math.round(r.width)
+      if (w >= 8 && w <= 64) iconSizes.push(w)
+    }
+
+    const cls = typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className : ''
+    if (
+      /card|panel|tile|surface/i.test(cls) ||
+      tag === 'article' ||
+      el.getAttribute('data-slot') === 'card'
+    ) {
+      const sh = cs.boxShadow || 'none'
+      if (sh && sh !== 'none') cardShadows.add(sh.replace(/\s+/g, ' ').slice(0, 120))
+      const pad =
+        (parseFloat(cs.paddingTop) || 0) +
+        (parseFloat(cs.paddingRight) || 0) +
+        (parseFloat(cs.paddingBottom) || 0) +
+        (parseFloat(cs.paddingLeft) || 0)
+      if (pad > 0 && r.width > 80) {
+        cardPadSum += pad / 4
+        cardPadN++
+      }
+    }
+
+    if (tag === 'button' || tag === 'input' || tag === 'a' || el.getAttribute('role') === 'button') {
+      const bw = Math.max(
+        parseFloat(cs.borderTopWidth) || 0,
+        parseFloat(cs.borderRightWidth) || 0,
+        parseFloat(cs.borderBottomWidth) || 0,
+        parseFloat(cs.borderLeftWidth) || 0
+      )
+      if (bw > 0) borderWidths.add(Math.round(bw * 2) / 2)
+      // Thick near-black border on controls reads harsh (often mistaken focus/active).
+      const bc = cs.borderTopColor || ''
+      const dark =
+        /rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)/i.exec(bc) ||
+        /#([0-9a-f]{3,8})/i.exec(bc)
+      let isHarshColor = false
+      if (dark && dark[1] && dark[2] && dark[3] && !bc.startsWith('#')) {
+        const lum = (Number(dark[1]) + Number(dark[2]) + Number(dark[3])) / 3
+        isHarshColor = lum < 50
+      } else if (bc.startsWith('#')) {
+        const hex = bc.slice(1)
+        const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6)
+        const n = parseInt(full, 16)
+        if (Number.isFinite(n)) {
+          const rr = (n >> 16) & 255
+          const gg = (n >> 8) & 255
+          const bb = n & 255
+          isHarshColor = (rr + gg + bb) / 3 < 50
+        }
+      }
+      if (bw >= 2.5 && isHarshColor) harshControlBorders++
+    }
+  }
+
+  const sizesSorted = [...sizeUsage.entries()].sort((a, b) => b[1] - a[1])
+  const bodyFontSizePx = sizesSorted[0]?.[0] ?? 16
+  const bodyLineHeight =
+    lineHeights.length > 0
+      ? Math.round((lineHeights.reduce((s, x) => s + x, 0) / lineHeights.length) * 100) / 100
+      : 1.5
+  const uniqueFontSizes = sizeUsage.size
+  // Premium type scales stick to even / 4px steps; odd px sizes are orphans.
+  const fontSizesOff4pxLadder = [...sizeUsage.keys()].filter((sz) => sz % 2 !== 0).length
+
+  const uniqueFontWeights = weightUsage.size
+  const hierarchySizeDeltaPx = Math.max(0, headingMaxSizePx - bodyFontSizePx)
+  const bodyWeight =
+    [...weightUsage.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 400
+  const headingBodyWeightContrast = headingMaxWeight >= bodyWeight + 200
+
+  const mainRect = mainEl.getBoundingClientRect()
+  const mainArea = Math.max(1, mainRect.width * Math.max(mainRect.height, 400))
+  const contentAreaRatio = Math.min(1, contentBoxArea / mainArea)
+
+  let avgTextDensity = 0
+  if (sections.length) {
+    avgTextDensity =
+      sections.reduce((s: number, sec: { stats?: { textDensity?: number } }) => s + (sec.stats?.textDensity ?? 0), 0) /
+      sections.length
+  }
+
+  let iconSizeVariance = 0
+  const uniqueIconSizes = new Set(iconSizes).size
+  if (iconSizes.length >= 3) {
+    const mean = iconSizes.reduce((s, x) => s + x, 0) / iconSizes.length
+    iconSizeVariance =
+      Math.round(
+        Math.sqrt(iconSizes.reduce((s, x) => s + (x - mean) ** 2, 0) / iconSizes.length) * 10
+      ) / 10
+  }
+
+  const crampedSiblingGaps = layout.offRhythmGaps ?? 0
+
+  const premium = {
+    bodyFontSizePx,
+    bodyLineHeight,
+    uniqueFontSizes,
+    fontSizesOff4pxLadder,
+    uniqueFontWeights,
+    headingMaxSizePx,
+    hierarchySizeDeltaPx,
+    headingBodyWeightContrast,
+    avgTextDensity: Math.round(avgTextDensity * 100) / 100,
+    contentAreaRatio: Math.round(contentAreaRatio * 100) / 100,
+    avgCardPaddingPx: cardPadN ? Math.round(cardPadSum / cardPadN) : 0,
+    uniqueCardShadows: cardShadows.size,
+    uniqueIconSizes,
+    iconSizeVariance,
+    harshControlBorders,
+    uniqueBorderWidths: borderWidths.size,
+    crampedSiblingGaps
+  }
+
+  /* ---------------- Impeccable AI-slop signals ------------------------- */
+  // Lightweight DOM/CSS tells mirroring https://impeccable.style/slop
+  let gradientBackgrounds = 0
+  let gradientTexts = 0
+  let bounceTransitions = 0
+  let pulsingDots = 0
+  let sideTabBorders = 0
+  let nestedCards = 0
+  let iconTileHeadings = 0
+  let heroEyebrowChips = 0
+
+  const isColoredBorder = (color: string): boolean => {
+    const m = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(color || '')
+    if (!m) return /#(?:[0-9a-f]{3}){1,2}/i.test(color) && !/^#([89a-f]|[89a-f]{2})\1\1$/i.test(color.trim())
+    const r = Number(m[1])
+    const g = Number(m[2])
+    const b = Number(m[3])
+    const max = Math.max(r, g, b)
+    const min = Math.min(r, g, b)
+    // Neutral grey/black/white borders are fine; chromatic side stripes are the tell.
+    return max - min >= 25 && max >= 60
+  }
+
+  const hasSideColorAccent = (cs: CSSStyleDeclaration): boolean => {
+    const sides: { w: number; c: string }[] = [
+      { w: parseFloat(cs.borderLeftWidth) || 0, c: cs.borderLeftColor },
+      { w: parseFloat(cs.borderRightWidth) || 0, c: cs.borderRightColor },
+      { w: parseFloat(cs.borderTopWidth) || 0, c: cs.borderTopColor },
+      { w: parseFloat(cs.borderBottomWidth) || 0, c: cs.borderBottomColor }
+    ]
+    const maxW = Math.max(...sides.map((s) => s.w))
+    if (maxW < 3) return false
+    const thick = sides.filter((s) => s.w >= 3 && s.w >= maxW - 0.5)
+    // One (or two opposite) side(s) much thicker than the rest + chromatic colour.
+    const thin = sides.filter((s) => s.w < maxW - 1.5)
+    if (thin.length < 2) return false
+    return thick.some((s) => isColoredBorder(s.c))
+  }
+
+  // Prefer card / section / list-item surfaces — not every random div with a thick border.
+  const sideAccentCandidates = Array.from(
+    document.querySelectorAll(
+      'article, section, li, [class*=card i], [data-slot=card], [class*=panel i], [class*=tile i], [class*=section i], [role=listitem], [role=article]'
+    )
+  )
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 120)
+
+  for (const el of sideAccentCandidates) {
+    const r = el.getBoundingClientRect()
+    if (r.width < 80 || r.height < 40) continue
+    if (hasSideColorAccent(getComputedStyle(el))) sideTabBorders++
+  }
+
+  for (const el of all.slice(0, 1200)) {
+    const cs = getComputedStyle(el)
+    const bgImage = cs.backgroundImage || ''
+    if (/gradient\(/i.test(bgImage)) {
+      gradientBackgrounds++
+      if (cs.webkitBackgroundClip === 'text' || (cs as any).backgroundClip === 'text') gradientTexts++
+    }
+    if (/cubic-bezier\([^)]+\)/i.test(cs.transitionTimingFunction) && /bounce|elastic|back/i.test(cs.transitionTimingFunction)) {
+      bounceTransitions++
+    }
+    if (/bounce|elastic/i.test(cs.animationName || '')) bounceTransitions++
+    if (/pulse/i.test(cs.animationName || '') && el.getBoundingClientRect().width <= 16) pulsingDots++
+  }
+
+  for (const card of Array.from(document.querySelectorAll('[class*=card i], [data-slot=card], article'))
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 60)) {
+    if (card.querySelector('[class*=card i], [data-slot=card], article')) nestedCards++
+  }
+
+  for (const h of Array.from(document.querySelectorAll('h1, h2, h3')).filter((e) => isVisible(e)).slice(0, 40)) {
+    const prev = h.previousElementSibling as HTMLElement | null
+    if (!prev) continue
+    const r = prev.getBoundingClientRect()
+    if (r.width >= 28 && r.width <= 72 && r.height >= 28 && r.height <= 72) {
+      const cs = getComputedStyle(prev)
+      if (parseFloat(cs.borderRadius) >= 6) iconTileHeadings++
+    }
+    // Eyebrow: small uppercase tracked label immediately above a large heading
+    if (prev.tagName === 'P' || prev.tagName === 'SPAN' || /chip|badge|eyebrow|kicker/i.test(prev.className)) {
+      const pcs = getComputedStyle(prev)
+      const hs = getComputedStyle(h)
+      if (
+        parseFloat(pcs.fontSize) <= 14 &&
+        (pcs.textTransform === 'uppercase' || /tracking|uppercase/i.test(prev.className)) &&
+        parseFloat(hs.fontSize) >= 36
+      ) {
+        heroEyebrowChips++
+      }
+    }
+  }
+
+  const slop = {
+    gradientBackgrounds,
+    gradientTexts,
+    bounceTransitions,
+    pulsingDots,
+    sideTabBorders,
+    nestedCards,
+    iconTileHeadings,
+    heroEyebrowChips
   }
 
   /* ---------------- component-level theme samples ---------------------- */
@@ -994,6 +1371,9 @@ export const extractFn = function (): any {
       ),
       layout,
       polish,
+      brokenUi,
+      premium,
+      slop,
       componentTheme,
       // Must skip Agentation / Vercel toolbar / etc. — they stay in the DOM
       // after hideDevChrome (display:none) and would otherwise inflate this

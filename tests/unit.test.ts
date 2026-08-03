@@ -14,7 +14,15 @@ import { loginUrlGuesses, passwordCandidates, redactAuth, usernameCandidates } f
 import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services/runner.js'
 import { deleteCredential, listCredentials, originOf, resolveCredential, saveCredential } from '../src/main/services/vault.js'
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
-import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow } from '../src/main/services/flows.js'
+import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow, isChromeAssert, isSiteChromeLabel, isPlaceholderAssert, isSoft404Assert } from '../src/main/services/flows.js'
+import { auditImpeccableSlop } from '../src/main/services/impeccableSlop.js'
+import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath } from '../src/main/services/brokenUi.js'
+import {
+  auditPremiumCraft,
+  premiumCraftScore,
+  summarizePremiumCraft
+} from '../src/main/services/premiumCraft.js'
+import { isDetailPath } from '../src/main/services/componentGaps.js'
 import { isDeeperRoute, sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
@@ -1195,6 +1203,417 @@ test('validateFlow rejects vague assertText body', () => {
   assert.match(bad.invalid!, /vague|body/i)
 })
 
+test('chrome asserts and brand/nav labels are stripped from detail flows', () => {
+  const mk = (path: string, heading: string, controls: { text: string; tag?: string; role?: string }[]) =>
+    page({
+      url: `https://app.test${path}`,
+      title: 'Falnor',
+      controls: controls.map((c) => ({
+        tag: c.tag ?? 'a',
+        type: '',
+        role: c.role ?? 'link',
+        text: c.text,
+        placeholder: '',
+        label: '',
+        ariaLabel: '',
+        name: '',
+        href: path,
+        testId: ''
+      })),
+      sections: [
+        {
+          id: 's1',
+          role: 'content',
+          roleConfidence: 1,
+          label: heading,
+          selector: 'main',
+          rect: { x: 0, y: 0, width: 1440, height: 600 },
+          textPreview: `${heading} Falnor Overview`,
+          headings: [heading, 'Falnor'],
+          ctaLabels: ['Overview', 'Falnor'],
+          components: [],
+          stats: {
+            interactiveCount: 2,
+            imageCount: 0,
+            textDensity: 1,
+            distinctBgColors: 1,
+            distinctFontSizes: 2,
+            maxTextWidthPx: 400
+          }
+        }
+      ]
+    })
+  const pages = [
+    mk('/tasks', 'Tasks', [
+      { text: 'Falnor' },
+      { text: 'Overview' },
+      { text: 'Claim', tag: 'button', role: 'button' }
+    ]),
+    mk('/agents', 'Agents', [
+      { text: 'Falnor' },
+      { text: 'Overview' },
+      { text: 'Edit', tag: 'button', role: 'button' }
+    ]),
+    mk('/tasks/abc', 'CLM-1042', [
+      { text: 'Falnor' },
+      { text: 'Overview' },
+      { text: 'Claim', tag: 'button', role: 'button' }
+    ])
+  ]
+  assert.equal(isSiteChromeLabel('Falnor', pages), true)
+  assert.equal(isSiteChromeLabel('Overview', pages), true)
+  assert.equal(isChromeAssert('falnor', pages), true)
+  assert.equal(isSiteChromeLabel('Claim', pages), false)
+
+  const deep = detailRecordFlows(pages)
+  const detail = deep.find((f) => /tasks detail/i.test(f.name))
+  assert.ok(detail)
+  assert.ok(
+    !detail!.steps.some((s) => s.action === 'click' && /Falnor|Overview/i.test(s.target ?? '')),
+    'must not click brand/nav chrome on detail flows'
+  )
+  assert.ok(detail!.steps.some((s) => s.action === 'click' && s.target === 'text=Claim'))
+
+  const validated = validateFlow(
+    {
+      name: 'Open /tasks detail records',
+      steps: [
+        { action: 'goto', target: '/tasks/abc' },
+        { action: 'assertText', value: 'Falnor' },
+        { action: 'click', target: 'text=Falnor' },
+        { action: 'click', target: 'text=Claim' }
+      ]
+    },
+    pages
+  )
+  assert.equal(validated.invalid, undefined)
+  assert.ok(!validated.steps.some((s) => s.action === 'assertText' && /falnor/i.test(s.value ?? '')))
+  assert.ok(!validated.steps.some((s) => s.action === 'click' && /Falnor/i.test(s.target ?? '')))
+  assert.ok(validated.steps.some((s) => s.action === 'click' && s.target === 'text=Claim'))
+})
+
+test('impeccable slop rules flag purple palette and overused fonts', () => {
+  const p = page({
+    url: 'https://slop.test/',
+    tokens: {
+      colors: [
+        { value: 'rgb(124, 58, 237)', usage: 20, role: 'bg' },
+        { value: 'rgb(91, 33, 182)', usage: 12, role: 'bg' },
+        { value: 'rgb(255, 255, 255)', usage: 40, role: 'text' }
+      ],
+      fontFamilies: [
+        { value: 'Inter', usage: 80 },
+        { value: 'Geist', usage: 10 }
+      ],
+      fontSizes: [{ value: 16, usage: 40 }],
+      fontWeights: [{ value: 400, usage: 40 }],
+      radii: [{ value: '12px', usage: 20 }],
+      shadows: [{ value: '0px 0px 24px rgba(124, 58, 237, 0.6)', usage: 8 }],
+      spacing: [{ value: 16, usage: 20 }],
+      transitions: []
+    }
+  })
+  const findings = auditImpeccableSlop(p)
+  assert.ok(findings.some((f) => /purple|violet/i.test(f.title)))
+  assert.ok(findings.some((f) => /overused font/i.test(f.title)))
+  assert.ok(findings.some((f) => /glow/i.test(f.title)))
+})
+
+test('impeccable slop flags side colour accents on cards and sections', () => {
+  const p = page({
+    url: 'https://slop.test/cards',
+    signals: {
+      slop: { sideTabBorders: 3 }
+    } as CapturedPage['signals']
+  })
+  const findings = auditImpeccableSlop(p)
+  const hit = findings.find((f) => /side colour|side-tab|side color/i.test(f.title + f.detail))
+  assert.ok(hit, 'expected a side-colour accent finding')
+  assert.match(hit!.detail, /do not add side colour|cards|sections/i)
+  assert.equal(hit!.severity, 'major')
+})
+
+test('soft-404 copy is detected on detail routes', () => {
+  assert.equal(looksLikeSoft404('Run not found'), true)
+  assert.equal(looksLikeSoft404('No run at this address'), true)
+  assert.equal(looksLikeSoft404('Dashboard overview with metrics'), false)
+  assert.equal(isDetailPath('/traces/xh7c1abc0123456789'), true)
+})
+
+test('auditBrokenUi flags soft-404 detail shells as critical', () => {
+  const p = page({
+    url: 'https://app.test/traces/xh7c1abc0123456789',
+    title: 'Run not found',
+    signals: {
+      brokenUi: {
+        soft404: true,
+        soft404Evidence: 'Run not found · No run at this address',
+        clippedTextNodes: 0,
+        overlappingTextPairs: 0,
+        mainContentChars: 48
+      }
+    } as CapturedPage['signals']
+  })
+  const findings = auditBrokenUi(p)
+  const hit = findings.find((f) => /not-found|missing-record/i.test(f.title))
+  assert.ok(hit, 'expected soft-404 finding')
+  assert.equal(hit!.severity, 'critical')
+  assert.equal(hit!.category, 'flow')
+  assert.ok(brokenUiCritiqueBoost(p) >= 500)
+})
+
+test('auditBrokenUi flags clipped and overlapping text', () => {
+  const p = page({
+    url: 'https://app.test/traces/xh74abc0123456789',
+    signals: {
+      brokenUi: {
+        soft404: false,
+        clippedTextNodes: 5,
+        overlappingTextPairs: 4,
+        mainContentChars: 1200
+      }
+    } as CapturedPage['signals']
+  })
+  const findings = auditBrokenUi(p)
+  assert.ok(findings.some((f) => /clipped|overflow/i.test(f.title)))
+  assert.ok(findings.some((f) => /overlapping text/i.test(f.title)))
+  assert.ok(brokenUiCritiqueBoost(p) > 100)
+})
+
+test('validateFlow drops placeholder and soft-404 asserts', () => {
+  const p = page({
+    url: 'https://app.test/tasks',
+    title: 'Tasks',
+    controls: [
+      {
+        tag: 'input',
+        type: 'text',
+        role: '',
+        editable: true,
+        text: '',
+        placeholder: 'Search tasks…',
+        label: '',
+        ariaLabel: '',
+        name: 'q',
+        href: '',
+        testId: ''
+      }
+    ],
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'Tasks',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 1440, height: 600 },
+        textPreview: 'Tasks Search tasks… No matching tasks',
+        headings: ['Tasks'],
+        ctaLabels: ['Start work'],
+        components: [],
+        stats: {
+          interactiveCount: 2,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 1,
+          maxTextWidthPx: 400
+        }
+      }
+    ]
+  })
+  assert.equal(isPlaceholderAssert('Search tasks…', [p]), true)
+  assert.equal(isSoft404Assert('No run at this address'), true)
+  const weak = validateFlow(
+    {
+      name: 'Search tasks',
+      steps: [
+        { action: 'goto', target: '/tasks' },
+        { action: 'fill', target: 'placeholder=Search tasks…', value: 'qualition' },
+        { action: 'assertText', value: 'Search tasks…' }
+      ]
+    },
+    [p]
+  )
+  assert.equal(weak.invalid, undefined, weak.invalid)
+  assert.ok(!weak.steps.some((s) => s.action === 'assertText'), 'placeholder assert must be dropped')
+
+  const soft = validateFlow(
+    {
+      name: 'Open missing trace',
+      steps: [
+        { action: 'goto', target: '/tasks' },
+        { action: 'assertText', value: 'No run at this address' }
+      ]
+    },
+    [p]
+  )
+  assert.ok(!soft.steps.some((s) => s.action === 'assertText' && /no run/i.test(s.value ?? '')))
+})
+
+test('stuck Connecting + skeletons is a critical flow finding', () => {
+  const findings = auditPage(
+    page({
+      url: 'https://app.test/tasks',
+      signals: {
+        polish: {
+          stuckLoading: true,
+          connectingCopy: true,
+          skeletonCount: 24,
+          skeletonWithoutMinHeight: 0,
+          ariaBusyCount: 0,
+          emptyRegionsWithoutCta: 0,
+          vagueEmptyCopy: [],
+          genericCtaLabels: [],
+          disabledWithoutAria: 0
+        }
+      }
+    }),
+    config
+  )
+  const hit = findings.find((f) => /stuck in loading|Connecting/i.test(f.title))
+  assert.ok(hit, 'expected stuck-loading finding')
+  assert.equal(hit!.severity, 'critical')
+})
+
+test('critique priority downranks kit pages and boosts soft-404', () => {
+  const kit = page({ url: 'https://app.test/primitives' })
+  const soft = page({
+    url: 'https://app.test/traces/xh7c1abc0123456789',
+    title: 'Run not found',
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'x',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 100, height: 100 },
+        textPreview: 'No run at this address',
+        headings: ['No run at this address'],
+        ctaLabels: [],
+        components: [],
+        stats: {
+          interactiveCount: 0,
+          imageCount: 0,
+          textDensity: 1,
+          distinctBgColors: 1,
+          distinctFontSizes: 1,
+          maxTextWidthPx: 100
+        }
+      }
+    ]
+  })
+  assert.equal(isKitSpecimenPath(kit.url), true)
+  assert.ok(critiquePriorityScore(soft, 0) > critiquePriorityScore(kit, 40))
+})
+
+test('premium craft flags tiny body, flat hierarchy, elevation soup, harsh borders', () => {
+  const p = page({
+    url: 'https://app.test/desk',
+    signals: {
+      premium: {
+        bodyFontSizePx: 12,
+        bodyLineHeight: 1.2,
+        uniqueFontSizes: 11,
+        fontSizesOff4pxLadder: 4,
+        uniqueFontWeights: 6,
+        headingMaxSizePx: 13,
+        hierarchySizeDeltaPx: 1,
+        headingBodyWeightContrast: false,
+        avgTextDensity: 2.5,
+        contentAreaRatio: 0.9,
+        avgCardPaddingPx: 8,
+        uniqueCardShadows: 6,
+        uniqueIconSizes: 5,
+        iconSizeVariance: 6,
+        harshControlBorders: 3,
+        uniqueBorderWidths: 6,
+        crampedSiblingGaps: 5
+      }
+    } as CapturedPage['signals']
+  })
+  const findings = auditPremiumCraft(p)
+  assert.ok(findings.some((f) => /Body text is 12px/i.test(f.title)))
+  assert.ok(findings.some((f) => /Flat typographic hierarchy/i.test(f.title)))
+  assert.ok(findings.some((f) => /distinct card elevations/i.test(f.title)))
+  assert.ok(findings.some((f) => /harsh thick dark border/i.test(f.title)))
+  assert.ok(premiumCraftScore(p) < 55)
+})
+
+test('summarizePremiumCraft excludes kit specimen pages', () => {
+  const product = page({
+    url: 'https://app.test/tasks',
+    signals: {
+      premium: {
+        bodyFontSizePx: 16,
+        bodyLineHeight: 1.5,
+        uniqueFontSizes: 5,
+        fontSizesOff4pxLadder: 0,
+        uniqueFontWeights: 3,
+        headingMaxSizePx: 28,
+        hierarchySizeDeltaPx: 12,
+        headingBodyWeightContrast: true,
+        avgTextDensity: 1.2,
+        contentAreaRatio: 0.55,
+        avgCardPaddingPx: 20,
+        uniqueCardShadows: 2,
+        uniqueIconSizes: 2,
+        iconSizeVariance: 1,
+        harshControlBorders: 0,
+        uniqueBorderWidths: 2,
+        crampedSiblingGaps: 0
+      }
+    } as CapturedPage['signals']
+  })
+  const kit = page({
+    url: 'https://app.test/primitives',
+    signals: {
+      premium: {
+        bodyFontSizePx: 11,
+        bodyLineHeight: 1.1,
+        uniqueFontSizes: 14,
+        fontSizesOff4pxLadder: 8,
+        uniqueFontWeights: 7,
+        headingMaxSizePx: 12,
+        hierarchySizeDeltaPx: 1,
+        headingBodyWeightContrast: false,
+        avgTextDensity: 3,
+        contentAreaRatio: 0.95,
+        avgCardPaddingPx: 4,
+        uniqueCardShadows: 8,
+        uniqueIconSizes: 8,
+        iconSizeVariance: 10,
+        harshControlBorders: 5,
+        uniqueBorderWidths: 7,
+        crampedSiblingGaps: 8
+      }
+    } as CapturedPage['signals']
+  })
+  const summary = summarizePremiumCraft([product, kit])
+  assert.equal(summary.pageCount, 1)
+  assert.ok(summary.score >= 85, `expected strong product score, got ${summary.score}`)
+  assert.ok(summary.dimensions.typography >= 3)
+})
+
+test('craft category weight increase moves overall when craft findings dominate', () => {
+  const craftHeavy: Finding[] = Array.from({ length: 12 }, (_, i) => ({
+    id: `c${i}`,
+    category: 'craft' as const,
+    severity: 'critical' as const,
+    title: `Craft issue ${i}`,
+    detail: 'x',
+    fix: 'y',
+    pageUrl: 'https://app.test/',
+    source: 'heuristic' as const
+  }))
+  const card = scoreRun(craftHeavy, 4, 'harsh')
+  assert.ok(card.categories.craft.score < 60)
+  // With craft at 12% weight + worst-category cap, heavy craft defects pull overall down.
+  assert.ok(card.overall <= card.categories.craft.score + 25)
+  assert.ok(card.overall < 85)
+})
+
 test('flow count scales with the size of the crawl instead of a fixed handful', () => {
   const many = Array.from({ length: 10 }, (_, i) =>
     page({
@@ -1748,6 +2167,9 @@ test('buildFixPrompt groups root causes, uses pathnames, and drops hashed select
   assert.match(text, /Where: \//)
   assert.doesNotMatch(text, /styles-module__/)
   assert.match(text, /prefer measured interaction-probe and axe/i)
+  assert.match(text, /:focus-visible only/i)
+  assert.match(text, /harsh pressed|thick border/i)
+  assert.match(text, /Premium craft bar|Linear\/Stripe/i)
   // Empty family listed once across content sections; basics like button omitted
   const emptyMentions = [...text.matchAll(/npx shadcn@latest add empty/g)]
   assert.equal(emptyMentions.length, 1)

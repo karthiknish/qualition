@@ -432,7 +432,56 @@ function Overview({ run }: { run: Run }): JSX.Element {
         )}
       </Panel>
 
-      <div className="col-span-2 space-y-4">
+      {s?.premium && (
+        <Panel className="col-span-2" title="Premium Craft">
+          <div className="flex flex-wrap items-baseline gap-3">
+            <span className={cx('text-4xl font-semibold', gradeColor(s.premium.score))}>{s.premium.grade}</span>
+            <span className="text-xl tabular-nums text-zinc-400">
+              {s.premium.score}
+              <span className="text-sm text-zinc-600">/100</span>
+            </span>
+            <span className="text-[11px] text-zinc-500">
+              Linear/Stripe bar · {s.premium.pageCount} product page{s.premium.pageCount === 1 ? '' : 's'}
+              {s.premium.aiBlend ? ' · heuristics + AI' : ' · heuristics'}
+              {' · '}kit specimens excluded
+            </span>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-3 lg:grid-cols-4">
+            {(
+              [
+                ['hierarchy', 'Hierarchy'],
+                ['typography', 'Typography'],
+                ['spacing', 'Spacing'],
+                ['density', 'Density'],
+                ['elevation', 'Elevation'],
+                ['consistency', 'Consistency'],
+                ['distinctiveness', 'Distinctiveness']
+              ] as const
+            ).map(([key, label]) => {
+              const v = s.premium!.dimensions[key]
+              const pct = Math.round((v / 4) * 100)
+              return (
+                <div key={key}>
+                  <div className="flex justify-between text-[11px] text-zinc-400">
+                    <span>{label}</span>
+                    <span className="tabular-nums">{v}/4</span>
+                  </div>
+                  <Bar
+                    value={pct}
+                    className={pct >= 75 ? 'bg-emerald-500' : pct >= 50 ? 'bg-amber-500' : 'bg-red-500'}
+                  />
+                </div>
+              )
+            })}
+          </div>
+          <p className="mt-3 text-[11px] text-zinc-500">
+            {run.findings.filter((f) => f.category === 'craft').length} craft finding
+            {run.findings.filter((f) => f.category === 'craft').length === 1 ? '' : 's'} · filter Findings by Craft
+          </p>
+        </Panel>
+      )}
+
+      <div className={s?.premium ? 'col-span-3 space-y-4' : 'col-span-2 space-y-4'}>
         {run.lighthouse ? (
           <Panel
             title={

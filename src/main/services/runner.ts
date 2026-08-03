@@ -26,6 +26,8 @@ import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
 import { applyProductionPresence, partitionProductFindings } from './provenance.js'
+import { critiquePriorityScore, interactionProbeScore, isKitSpecimenPath } from './brokenUi.js'
+import { summarizePremiumCraft, type PremiumDimensionScores } from './premiumCraft.js'
 import { mapPool } from './pool.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
 
@@ -392,29 +394,42 @@ export async function executeRun(
       await saveRun(run)
     }
 
-    /* 2c. deep interaction probe — deepest pages, parallel pair, tighter budget */
+    /* 2c. deep interaction probe — mix of deep, list, and broken pages */
     if (cfg.useInteractionProbe) {
       const probeViewport = (cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS)[0]
-      const PROBE_PAGE_CAP = 5
+      const PROBE_PAGE_CAP = 8
       const PROBE_CONCURRENCY = 2
       const PROBE_BUDGET_MS = 60_000
-      // Prefer deeper routes (detail pages) — list shells alone miss the real UI.
-      const probeTargets = [...run.pages]
-        .sort((a, b) => {
-          const depthOf = (u: string): number => {
-            try {
-              return new URL(u).pathname.split('/').filter(Boolean).length
-            } catch {
-              return 0
-            }
-          }
-          return depthOf(b.url) - depthOf(a.url)
-        })
-        .slice(0, PROBE_PAGE_CAP)
+      const rankedProbe = [...run.pages].sort(
+        (a, b) => interactionProbeScore(b) - interactionProbeScore(a)
+      )
+      const probeTargets: typeof run.pages = []
+      const seen = new Set<string>()
+      // Always include at least one shallow product list when available.
+      for (const page of rankedProbe) {
+        if (probeTargets.length >= PROBE_PAGE_CAP) break
+        let depth = 0
+        try {
+          depth = new URL(page.url).pathname.split('/').filter(Boolean).length
+        } catch {
+          /* ignore */
+        }
+        if (depth === 1 && !isKitSpecimenPath(page.url) && !seen.has(page.url)) {
+          probeTargets.push(page)
+          seen.add(page.url)
+          break
+        }
+      }
+      for (const page of rankedProbe) {
+        if (probeTargets.length >= PROBE_PAGE_CAP) break
+        if (seen.has(page.url)) continue
+        seen.add(page.url)
+        probeTargets.push(page)
+      }
       if (run.pages.length > PROBE_PAGE_CAP) {
         log(
           'info',
-          `Interaction probe capped at ${PROBE_PAGE_CAP} deepest page(s) (of ${run.pages.length}); concurrency ${PROBE_CONCURRENCY}`
+          `Interaction probe capped at ${PROBE_PAGE_CAP} risk-ranked page(s) (of ${run.pages.length}); concurrency ${PROBE_CONCURRENCY}`
         )
       }
       progress('interaction', 44, `Probing ${probeTargets.length} page(s) (×${PROBE_CONCURRENCY})`)
@@ -567,11 +582,14 @@ export async function executeRun(
       const PAGE_BUDGET = 12
       const SECTION_BUDGET = 12
       const CRITIQUE_CONCURRENCY = 3
-      const ranked = [...run.pages].sort(
-        (a, b) =>
-          run.findings.filter((f) => f.pageUrl === b.url).length -
-          run.findings.filter((f) => f.pageUrl === a.url).length
-      )
+      const ranked = [...run.pages].sort((a, b) => {
+        const score = (p: typeof a) =>
+          critiquePriorityScore(
+            p,
+            run.findings.filter((f) => f.pageUrl === p.url).length
+          )
+        return score(b) - score(a)
+      })
       const targetsForCritique = ranked.slice(0, PAGE_BUDGET)
       if (ranked.length > PAGE_BUDGET) {
         log(
@@ -586,6 +604,8 @@ export async function executeRun(
       )
 
       let pagesDone = 0
+      const aiPremiumAcc: Partial<PremiumDimensionScores> = {}
+      const aiPremiumCounts: Partial<Record<keyof PremiumDimensionScores, number>> = {}
       try {
         const pageCritiques = await mapPool(
           targetsForCritique,
@@ -616,7 +636,26 @@ export async function executeRun(
           if (!row.res) continue
           run.findings.push(...row.res.findings)
           if (row.res.themeRead) run.themeSummary = `${run.themeSummary}\n\n${row.res.themeRead}`
+          if (row.res.premiumVerdict) {
+            run.themeSummary = `${run.themeSummary}\n\nPremium: ${row.res.premiumVerdict}`
+          }
+          if (row.res.premiumScores && !isKitSpecimenPath(row.page.url)) {
+            for (const [k, v] of Object.entries(row.res.premiumScores) as [
+              keyof PremiumDimensionScores,
+              number
+            ][]) {
+              aiPremiumAcc[k] = (aiPremiumAcc[k] ?? 0) + v
+              aiPremiumCounts[k] = (aiPremiumCounts[k] ?? 0) + 1
+            }
+          }
         }
+        // Stash averaged AI premium dims on the run object for scorecard blend.
+        const aiAvg: Partial<PremiumDimensionScores> = {}
+        for (const k of Object.keys(aiPremiumCounts) as (keyof PremiumDimensionScores)[]) {
+          const n = aiPremiumCounts[k] ?? 0
+          if (n > 0) aiAvg[k] = Math.round(((aiPremiumAcc[k] ?? 0) / n) * 10) / 10
+        }
+        ;(run as { _aiPremiumDims?: Partial<PremiumDimensionScores> })._aiPremiumDims = aiAvg
 
         // Section critiques after page pass — shared budget, concurrent.
         const sectionJobs: { page: (typeof targetsForCritique)[0]; sectionId: string }[] = []
@@ -1012,6 +1051,9 @@ export async function executeRun(
     }
 
     run.scorecard = scoreRun(run.findings, run.pages.length, cfg.brutality)
+    const aiDims = (run as { _aiPremiumDims?: Partial<PremiumDimensionScores> })._aiPremiumDims
+    run.scorecard.premium = summarizePremiumCraft(run.pages, aiDims)
+    delete (run as { _aiPremiumDims?: Partial<PremiumDimensionScores> })._aiPremiumDims
     if (aiEnabled && !state.cancelled) {
       try {
         run.geminiNotes = await raceCancel(
@@ -1026,7 +1068,7 @@ export async function executeRun(
     await browser.close()
     run.status = 'done'
     run.finishedAt = Date.now()
-    progress('done', 100, `Done · grade ${run.scorecard.grade} (${run.scorecard.overall}/100) · ${run.findings.length} findings`)
+    progress('done', 100, `Done · grade ${run.scorecard.grade} (${run.scorecard.overall}/100)${run.scorecard.premium ? ` · premium ${run.scorecard.premium.grade}` : ''} · ${run.findings.length} findings`)
   } catch (e) {
     const msg = (e as Error).message
     // Cancelling closes the browser, so in-flight Playwright calls throw their
@@ -1051,6 +1093,7 @@ export async function executeRun(
       }
       if (!run.scorecard && run.findings.length > 0) {
         run.scorecard = scoreRun(run.findings, Math.max(1, run.pages.length), cfg.brutality)
+        run.scorecard.premium = summarizePremiumCraft(run.pages)
       }
       log('info', `Cancelled by user — keeping ${run.findings.length} finding(s) from ${run.pages.length} page(s)`)
       emit({

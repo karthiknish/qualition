@@ -426,6 +426,15 @@ export function buildFixPrompt(run: Run, opts: PromptOptions = {}): string {
   out.push('- Fix the cause, not the symptom: prefer one token/component change over N one-off patches.')
   out.push('- Do not redesign anything that is not listed. No new visual direction, no library swaps beyond what is suggested.')
   out.push('- Keep the existing design language; the goal is coherence and correctness, not novelty.')
+  out.push(
+    '- Strip AI slop (impeccable.style): no purple gradients, cream-beige defaults, Inter-as-personality, gradient text, side colour accents on cards/sections, nested cards, icon-tile feature grids, glow shadows, or bounce easing — unless the finding explicitly asks for brand-distinctive type/colour.'
+  )
+  out.push(
+    '- Focus indicators: :focus-visible only with a soft offset ring/outline (token ring colour). Never a thick border on :focus or :active — that leaves a harsh pressed look for mouse users.'
+  )
+  out.push(
+    '- Premium craft bar (Linear/Stripe): clear type ladder (≤8 sizes), heading size+weight contrast, 8px spacing rhythm, intentional density, 1–3 elevation layers, one icon/border language — not Inter-default beige AI shells.'
+  )
   out.push('- Work the root-cause list in order. Do measured accessibility and token fixes before [review] polish.')
   out.push('- After each change, state which finding id it resolves.')
   out.push('')

@@ -7,9 +7,14 @@
  * the calls-to-action it saw in each section.
  */
 import type { CapturedPage, FlowStep, PageControl } from '../../shared/types.js'
+import { looksLikeSoft404 } from './brokenUi.js'
 
 const UNSAFE =
   /\b(delete|remove|destroy|cancel|unsubscribe|pay|purchase|buy|checkout|order|log ?out|sign ?out|deactivate|close account|upgrade now|billing)\b/i
+
+/** Nav / brand chrome that must not be used as a "detail page action". */
+const CHROME_LABEL =
+  /^(overview|home|dashboard|settings|ask\b.*|menu|search|notifications?|profile|account|inbox|messages?|help|docs|logo|sign\s*in|log\s*in)$/i
 
 function pathOf(url: string): string {
   try {
@@ -20,12 +25,80 @@ function pathOf(url: string): string {
   }
 }
 
+function pageCorpus(page: CapturedPage): string {
+  return norm(
+    [
+      page.title,
+      ...page.sections.flatMap((s) => [s.textPreview, s.label, ...s.headings, ...s.ctaLabels])
+    ].join(' ')
+  )
+}
+
+/**
+ * Labels that appear as clickable chrome on most pages (sidebar brand, Overview,
+ * Ask …). Clicking these "proves" nothing about a detail journey.
+ */
+export function isSiteChromeLabel(label: string, pages: CapturedPage[]): boolean {
+  const n = norm(label)
+  if (!n || n.length < 2) return true
+  if (CHROME_LABEL.test(n)) return true
+  if (pages.length < 3) return false
+  const hits = pages.filter((p) =>
+    (p.controls ?? []).some((c) => {
+      const h = norm(c.text || c.ariaLabel || '')
+      return h === n || h.startsWith(n) || n.startsWith(h)
+    })
+  ).length
+  // Must be nearly ubiquitous (≥75%) — a CTA on two list pages is not chrome.
+  return hits >= Math.ceil(pages.length * 0.75)
+}
+
+/** Assert text that is present on every page cannot prove a journey moved. */
+export function isChromeAssert(needle: string, pages: CapturedPage[]): boolean {
+  const n = norm(needle)
+  if (!n || n.length < 4) return true
+  if (pages.length < 3) return false
+  const hits = pages.filter((p) => pageCorpus(p).includes(n)).length
+  return hits >= pages.length
+}
+
+/** Soft-404 copy must never be a happy-path assert — landing there is a failure. */
+export function isSoft404Assert(needle: string): boolean {
+  return looksLikeSoft404(needle)
+}
+
+/** Placeholders disappear once the field is filled — asserting them proves nothing. */
+export function isPlaceholderAssert(needle: string, pages: CapturedPage[]): boolean {
+  const n = norm(needle)
+  if (!n || n.length < 3) return false
+  const placeholders = pages.flatMap((p) =>
+    (p.controls ?? [])
+      .map((c) => norm(c.placeholder || ''))
+      .filter(Boolean)
+  )
+  return placeholders.some((ph) => ph === n || ph.includes(n) || n.includes(ph))
+}
+
+function pageLooksSoft404(page: CapturedPage): boolean {
+  const broken = (page.signals as { brokenUi?: { soft404?: boolean } } | undefined)?.brokenUi
+  if (broken?.soft404) return true
+  const blob = [page.title, ...page.sections.flatMap((s) => [...s.headings, s.textPreview])].join(' ')
+  return looksLikeSoft404(blob)
+}
+
 /** Words that make a decent assertText target: visible, stable, specific. */
-function assertionFor(page: CapturedPage): string | null {
-  const heading = page.sections.flatMap((s) => s.headings).find((h) => h.length > 3 && h.length < 60)
-  if (heading) return heading
-  const title = page.title?.split(/[|\-–]/)[0]?.trim()
-  return title && title.length > 3 && title.length < 60 ? title : null
+function assertionFor(page: CapturedPage, allPages: CapturedPage[] = []): string | null {
+  if (pageLooksSoft404(page)) return null
+  const candidates = [
+    ...page.sections.flatMap((s) => s.headings),
+    page.title?.split(/[|\-–]/)[0]?.trim() ?? ''
+  ].filter((h) => h.length > 3 && h.length < 60 && !looksLikeSoft404(h))
+  for (const h of candidates) {
+    if (allPages.length >= 3 && isChromeAssert(h, allPages)) continue
+    if (isPlaceholderAssert(h, allPages.length ? allPages : [page])) continue
+    return h
+  }
+  return candidates[0] ?? null
 }
 
 /* --------------------------- flow validation ------------------------------ */
@@ -98,14 +171,7 @@ export function validateFlow(
   // Everything textual the crawl actually observed: body previews, headings,
   // CTA labels, section labels and the page title. Headings in particular are
   // the most natural assertion target, so they must be part of the corpus.
-  const allText = pages.map((p) =>
-    norm(
-      [
-        p.title,
-        ...p.sections.flatMap((s) => [s.textPreview, s.label, ...s.headings, ...s.ctaLabels])
-      ].join(' ')
-    )
-  )
+  const allText = pages.map((p) => pageCorpus(p))
   const problems: string[] = []
   const refusedFills: string[] = []
   const cleanedSteps: FlowStep[] = []
@@ -140,6 +206,10 @@ export function validateFlow(
           ...step,
           intent: step.intent ?? (step.action === 'fill' ? `Fill ${target}` : `Activate ${target}`)
         })
+        continue
+      }
+      if (step.action === 'click' && isSiteChromeLabel(needle, pages) && /detail|record|inspect|edit/i.test(flow.name)) {
+        // Drop chrome clicks from detail journeys — they fake a pass via the sidebar.
         continue
       }
       const corpus = step.action === 'fill' ? fieldHandles : allHandles
@@ -190,6 +260,26 @@ export function validateFlow(
       if (/^(body|html|document|page|content)$/i.test(needle)) {
         problems.push(`assertText "${needle}" is too vague to prove the journey worked`)
         continue
+      }
+      if (isChromeAssert(needle, pages)) {
+        // Drop rather than invalidate the whole flow — chrome asserts are noise.
+        continue
+      }
+      if (isSoft404Assert(needle)) {
+        // Soft-404 copy means the journey failed — do not treat it as success criteria.
+        continue
+      }
+      if (isPlaceholderAssert(needle, pages)) {
+        // Placeholders vanish after fill; asserting them is a false failure.
+        continue
+      }
+      // fill → assertText(same placeholder) is a common model anti-pattern.
+      const prev = cleanedSteps[cleanedSteps.length - 1]
+      if (prev?.action === 'fill' && prev.target) {
+        const fillNeedle = norm(prev.target.replace(/^(text|label|placeholder|role)=/i, ''))
+        if (fillNeedle && (needle === fillNeedle || needle.includes(fillNeedle) || fillNeedle.includes(needle))) {
+          continue
+        }
       }
       const seen = allText.some((t) => t.includes(needle)) || [...allHandles].some((h) => h.includes(needle))
       if (!seen) problems.push(`text "${needle}" was never seen on any crawled page`)
@@ -304,7 +394,7 @@ export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps:
     const steps: FlowStep[] = [
       { action: 'goto', target: parent, intent: `Open list ${parent}` }
     ]
-    const listAssert = assertionFor(listPage)
+    const listAssert = assertionFor(listPage, ok)
     if (listAssert) {
       steps.push({ action: 'assertText', value: listAssert, intent: `Confirm list “${listAssert}”` })
     }
@@ -316,7 +406,7 @@ export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps:
         note: d.page.title,
         intent: `Open detail ${detailPath}`
       })
-      const detailAssert = assertionFor(d.page)
+      const detailAssert = assertionFor(d.page, ok)
       if (detailAssert) {
         steps.push({
           action: 'assertText',
@@ -325,10 +415,21 @@ export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps:
         })
       }
       // Prefer a real in-page control when the crawl saw one — proves interactivity
-      // beyond "the URL loaded".
+      // beyond "the URL loaded". Never pick sidebar brand / Overview / Ask …
       const actionLabel = (d.page.controls ?? [])
         .map((c) => (c.text || c.ariaLabel || '').trim())
-        .find((l) => l.length > 1 && l.length < 28 && !UNSAFE.test(l))
+        .find(
+          (l) =>
+            l.length > 1 &&
+            l.length < 28 &&
+            !UNSAFE.test(l) &&
+            !isSiteChromeLabel(l, ok) &&
+            (d.page.controls ?? []).some(
+              (c) =>
+                norm(c.text || c.ariaLabel || '') === norm(l) &&
+                (c.tag === 'button' || c.role === 'button' || c.type === 'submit')
+            )
+        )
       if (actionLabel) {
         steps.push({
           action: 'click',
@@ -370,7 +471,7 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
       note: page.title,
       intent: `Open ${pathOf(page.url)}`
     })
-    const assertion = assertionFor(page)
+    const assertion = assertionFor(page, ok)
     if (assertion) sweep.push({ action: 'assertText', value: assertion, intent: `Confirm “${assertion}”` })
   }
   if (sweep.length >= 2) flows.push({ name: 'Visit every discovered route', steps: sweep })
@@ -387,7 +488,7 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
     .filter((s) => s.role in ctaPriority)
     .sort((a, b) => ctaPriority[a.role] - ctaPriority[b.role])
     .flatMap((s) => s.ctaLabels)
-    .find((label) => label.length > 2 && label.length < 30 && !UNSAFE.test(label))
+    .find((label) => label.length > 2 && label.length < 30 && !UNSAFE.test(label) && !isSiteChromeLabel(label, ok))
   if (heroCta) {
     const steps: FlowStep[] = [
       { action: 'goto', target: pathOf(entry.url), intent: 'Open the entry page' },
@@ -395,7 +496,7 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
       { action: 'wait', value: '1200', intent: 'Wait for navigation' }
     ]
     const target = ok.find((p) => p.url !== entry.url)
-    const assertion = target ? assertionFor(target) : assertionFor(entry)
+    const assertion = target ? assertionFor(target, ok) : assertionFor(entry, ok)
     if (assertion) steps.push({ action: 'assertText', value: assertion, intent: `Confirm “${assertion}” is visible` })
     flows.push({ name: `Start work — “${heroCta}”`, steps })
   }
@@ -441,15 +542,17 @@ export function heuristicFlows(pages: CapturedPage[], maxFlows = 0): { name: str
     }
     if (targets.length < 2) continue
 
-    const assertion = assertionFor(p)
+    const assertion = assertionFor(p, ok)
     const steps: FlowStep[] = [{ action: 'goto', target: path }]
     for (const label of targets) {
+      if (isSiteChromeLabel(label, ok)) continue
       steps.push({ action: 'click', target: `text=${label}`, note: `click “${label}”` })
       steps.push({ action: 'wait', value: '800' })
       // Prove the click did something, then return for the next control.
       if (assertion) steps.push({ action: 'assertText', value: assertion })
       steps.push({ action: 'goto', target: path })
     }
+    if (steps.filter((s) => s.action === 'click').length < 2) continue
     flows.push({ name: `Click through ${path}`, steps })
   }
 

@@ -420,6 +420,22 @@ export interface Scorecard {
   grade: string
   verdict: string
   categories: Record<Category, { score: number; findings: number }>
+  /** Linear/Stripe-bar craft subscore (heuristics ± optional AI blend). */
+  premium?: {
+    score: number
+    grade: string
+    dimensions: {
+      hierarchy: number
+      typography: number
+      spacing: number
+      density: number
+      elevation: number
+      consistency: number
+      distinctiveness: number
+    }
+    pageCount: number
+    aiBlend?: boolean
+  }
 }
 
 export type RunStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled'

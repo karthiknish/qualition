@@ -18,6 +18,9 @@ import type {
 } from '../../shared/types.js'
 import { SEVERITY_WEIGHT } from '../../shared/types.js'
 import { guessEffort, provenanceForSelector } from './provenance.js'
+import { auditImpeccableSlop } from './impeccableSlop.js'
+import { auditBrokenUi } from './brokenUi.js'
+import { auditPremiumCraft } from './premiumCraft.js'
 
 let counter = 0
 function mk(
@@ -304,9 +307,36 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
         skeletonWithoutMinHeight?: number
         ariaBusyCount?: number
         disabledWithoutAria?: number
+        connectingCopy?: boolean
+        stuckLoading?: boolean
       }
     | null
   if (polish) {
+    if (polish.stuckLoading || ((polish.connectingCopy ?? false) && (polish.skeletonCount ?? 0) >= 4)) {
+      out.push(
+        mk(
+          page,
+          'flow',
+          'critical',
+          'Page stuck in loading / Connecting state',
+          `Capture still shows connecting/loading copy with ${polish.skeletonCount ?? 0} skeleton placeholder(s). Users see an unfinished shell, not the product.`,
+          'Finish the data load, show a real empty state with recovery CTA, or surface an error with retry — never leave Connecting… + skeletons as the settled UI.',
+          { effort: 'component', confidence: 'high' }
+        )
+      )
+    } else if ((polish.skeletonCount ?? 0) >= 10) {
+      out.push(
+        mk(
+          page,
+          'flow',
+          'major',
+          `${polish.skeletonCount} skeleton placeholders still visible after capture`,
+          'Dense skeleton rows after network idle usually means the list never resolved (or capture raced a hang).',
+          'Resolve the fetch, add a timeout empty/error state, and keep skeletons only for the brief in-flight window.',
+          { effort: 'component', confidence: 'medium' }
+        )
+      )
+    }
     if ((polish.emptyRegionsWithoutCta ?? 0) >= 1) {
       out.push(
         mk(
@@ -642,6 +672,15 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
     out.push(mk(page, 'content', 'minor', 'Hero headline is a paragraph', heroSection.headings[0], 'Under 60 characters. If it needs a comma and an "and", it is two ideas.', { sectionId: heroSection.id }))
   }
 
+  /* ---- Impeccable AI-slop tells (https://impeccable.style/slop) ---- */
+  out.push(...auditImpeccableSlop(page))
+
+  /* ---- soft-404 shells + clipped / colliding text ---- */
+  out.push(...auditBrokenUi(page))
+
+  /* ---- Premium craft (Linear / Stripe bar) ---- */
+  out.push(...auditPremiumCraft(page))
+
   return out
 }
 
@@ -811,8 +850,14 @@ export function scoreRun(findings: Finding[], pageCount: number, brutality: RunC
   }
 
   const weights: Record<Category, number> = {
-    coherence: 0.2, accessibility: 0.2, flow: 0.16, responsive: 0.14,
-    variety: 0.1, performance: 0.1, craft: 0.06, content: 0.04
+    coherence: 0.19,
+    accessibility: 0.19,
+    flow: 0.15,
+    responsive: 0.13,
+    variety: 0.08,
+    performance: 0.09,
+    craft: 0.12,
+    content: 0.05
   }
   let overall = 0
   for (const c of cats) overall += categories[c].score * weights[c]

@@ -895,8 +895,28 @@ export async function probeInteractions(
         )
         if (!el) break
         if ('lostFocus' in el && el.lostFocus) {
-          lostDocumentFocus = true
-          break
+          // One recovery attempt: Tab often escapes to Chromium chrome in headed/headless.
+          await soft(page.bringToFront(), 1500, 're-focus recover', undefined)
+          await soft(
+            page.locator('body').click({ position: { x: 4, y: 4 }, timeout: 1000 }),
+            1500,
+            're-activate',
+            undefined
+          )
+          if (pwFocusables > 0) {
+            await soft(seed.focus({ timeout: 1500 }), 2000, 're-seed focus', undefined)
+          }
+          const stillLost = await soft(
+            page.evaluate(() => !document.hasFocus()),
+            1000,
+            'check focus',
+            true
+          )
+          if (stillLost) {
+            lostDocumentFocus = true
+            break
+          }
+          continue
         }
         if (!('tag' in el) || !el.tag) break
         stops.push(`${el.tag}:${el.name}`)
@@ -985,7 +1005,7 @@ function summarise(r: InteractionReport, url: string, viewport: string): Finding
       mk(url, r.noFocusIndicator.length > 5 ? 'critical' : 'major',
         `${r.noFocusIndicator.length} control(s) have no visible focus state`,
         `After keyboard Tab focus, zero computed-style change and :focus-visible did not match: ${list(r.noFocusIndicator)}. Keyboard users cannot tell where they are (WCAG 2.4.7).`,
-        'Add a :focus-visible ring using the token ring colour — never outline:none without a replacement.',
+        'Use :focus-visible only (not :focus / :active): a soft offset ring or outline with the token ring colour. Do not thicken the control border on press — that reads as a harsh active state. Never outline:none without a replacement.',
         { viewport, category: 'accessibility', confidence: 'high', effort: 'one-line' })
     )
   }
