@@ -908,14 +908,23 @@ export const extractFn = function (): any {
     if (input.disabled && el.getAttribute('aria-disabled') !== 'true') disabledWithoutAria++
   }
 
-  // Stuck SPA shells: "Connecting…" / "Loading…" with rows of skeletons still on screen.
+  // Stuck SPA shells: "Connecting…" / "Loading…" with skeletons — or a bare
+  // spinner page with almost no content (outcomes-style hang).
   const polishRoot =
     (document.querySelector('main, [role=main]') as HTMLElement) || document.body
   const polishText = (polishRoot.innerText || polishRoot.textContent || '').replace(/\s+/g, ' ').trim()
-  const connectingCopy = /\b(connecting|still loading|please wait|loading[.…]*$)\b/i.test(
+  const connectingCopy = /\b(connecting|still loading|please wait|loading)\b/i.test(
     polishText.slice(0, 280)
   )
-  const stuckLoading = connectingCopy && skeletonCount >= 4
+  const spinnerLikely = !!document.querySelector(
+    '[class*="spinner" i], [class*="loading" i], [role="progressbar"], svg[class*="spin" i], [data-loading], [aria-busy="true"]'
+  )
+  const bareLoadingShell =
+    connectingCopy &&
+    polishText.length < 120 &&
+    skeletonCount < 4 &&
+    (spinnerLikely || polishText.length < 48)
+  const stuckLoading = (connectingCopy && skeletonCount >= 4) || bareLoadingShell
 
   const polish = {
     emptyRegionsWithoutCta,
@@ -926,7 +935,8 @@ export const extractFn = function (): any {
     ariaBusyCount,
     disabledWithoutAria,
     connectingCopy,
-    stuckLoading
+    stuckLoading,
+    bareLoadingShell
   }
 
   /* ---------------- broken / soft-404 / overflow UI ---------------------- */

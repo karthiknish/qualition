@@ -180,11 +180,30 @@ export function auditBrokenUi(page: CapturedPage): Finding[] {
 /** Boost pages that must enter the AI critique budget even with few other findings. */
 export function brokenUiCritiqueBoost(page: CapturedPage): number {
   const b = brokenUiFromSignals(page)
-  const polish = (page.signals as { polish?: { stuckLoading?: boolean; connectingCopy?: boolean; skeletonCount?: number } } | undefined)
-    ?.polish
+  const polish = (page.signals as {
+    polish?: {
+      stuckLoading?: boolean
+      connectingCopy?: boolean
+      skeletonCount?: number
+      bareLoadingShell?: boolean
+    }
+  } | undefined)?.polish
   let score = 0
-  if (polish?.stuckLoading || (polish?.connectingCopy && (polish.skeletonCount ?? 0) >= 4)) score += 400
-  else if ((polish?.skeletonCount ?? 0) >= 10) score += 120
+  if (
+    polish?.stuckLoading ||
+    polish?.bareLoadingShell ||
+    (polish?.connectingCopy && (polish.skeletonCount ?? 0) >= 4)
+  ) {
+    score += 400
+  } else if ((polish?.skeletonCount ?? 0) >= 10) score += 120
+  // Empty capture (spinner hang with no sections) must enter critique.
+  if (
+    (page.sections?.length ?? 0) === 0 &&
+    (page.controls?.length ?? 0) < 3 &&
+    (b?.mainContentChars ?? 999) < 40
+  ) {
+    score += 400
+  }
   if (!b) {
     const h1 = page.sections.flatMap((s) => s.headings).join(' · ')
     const sample = page.sections.map((s) => s.textPreview).join(' ').slice(0, 500)
@@ -300,7 +319,42 @@ export function interactionProbeScore(page: CapturedPage): number {
   // Prefer real product lists over kit pages.
   if (isProductListPath(page.url)) score += 55
   if (isKitSpecimenPath(page.url)) score -= 100
+  // Soft-404 shells are already covered by heuristics — probe live product UI first.
+  const soft = brokenUiFromSignals(page)?.soft404
+  if (soft) score -= 80
   const controls = page.controls?.length ?? 0
   score += Math.min(40, Math.floor(controls / 2))
   return score
+}
+
+/**
+ * Pick interaction-probe pages: reserve product-list seats so /spend and
+ * /traces are probed even when soft-404 / broken details rank higher.
+ */
+export function pickInteractionTargets(
+  pages: CapturedPage[],
+  budget = 8,
+  listSeats = 3
+): CapturedPage[] {
+  if (pages.length <= budget) return [...pages]
+  const ranked = [...pages].sort((a, b) => interactionProbeScore(b) - interactionProbeScore(a))
+  const picked: CapturedPage[] = []
+  const used = new Set<string>()
+
+  const seats = Math.min(listSeats, budget)
+  for (const p of ranked) {
+    if (picked.length >= seats) break
+    if (!isProductListPath(p.url)) continue
+    if (isKitSpecimenPath(p.url)) continue
+    picked.push(p)
+    used.add(p.url)
+  }
+
+  for (const p of ranked) {
+    if (picked.length >= budget) break
+    if (used.has(p.url)) continue
+    picked.push(p)
+    used.add(p.url)
+  }
+  return picked
 }

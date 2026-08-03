@@ -4,7 +4,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PNG } from 'pngjs'
-import { auditPage, dedupeFindings, deltaE, parseColor, scoreRun, themeSummary } from '../src/main/services/audit.js'
+import { auditPage, dedupeFindings, deltaE, parseColor, scoreRun, themeSummary, auditStaticDocumentTitles } from '../src/main/services/audit.js'
 import { detectArchetype, queryForSection } from '../src/main/services/archetype.js'
 import { analyzeCss, auditCss } from '../src/main/services/cssAudit.js'
 import { diffScreenshots } from '../src/main/services/visual.js'
@@ -16,7 +16,7 @@ import { deleteCredential, listCredentials, originOf, resolveCredential, saveCre
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
 import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow, isChromeAssert, isSiteChromeLabel, isPlaceholderAssert, isSoft404Assert } from '../src/main/services/flows.js'
 import { auditImpeccableSlop } from '../src/main/services/impeccableSlop.js'
-import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath, isSoft404Shell, isProductListPath, pickCritiqueTargets } from '../src/main/services/brokenUi.js'
+import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath, isSoft404Shell, isProductListPath, pickCritiqueTargets, pickInteractionTargets } from '../src/main/services/brokenUi.js'
 import { clampCategory } from '../src/main/services/critic.js'
 import {
   auditPremiumCraft,
@@ -857,6 +857,39 @@ test('site-wide findings are merged instead of penalised once per page', () => {
   assert.ok(scoreRun(merged, 3, 'ruthless').overall > scoreRun(findings, 3, 'ruthless').overall)
 })
 
+test('page-local clipped and axe findings are not merged across URLs', () => {
+  const clipped = (url: string, n: number): Finding => ({
+    id: url + n,
+    category: 'craft',
+    severity: n >= 8 ? 'critical' : 'major',
+    title: `${n} text node(s) clipped or overflowing their boxes`,
+    detail: 'Labels are cut off.',
+    fix: 'Widen the column.',
+    pageUrl: url,
+    source: 'heuristic'
+  })
+  const axe = (url: string): Finding => ({
+    id: 'axe-' + url,
+    category: 'accessibility',
+    severity: 'minor',
+    title: 'axe: All page content should be contained by landmarks',
+    detail: 'region',
+    fix: 'Add main.',
+    pageUrl: url,
+    source: 'axe'
+  })
+  const merged = dedupeFindings([
+    clipped('https://app.test/knowledge', 21),
+    clipped('https://app.test/templates', 4),
+    clipped('https://app.test/chat', 4),
+    axe('https://app.test/'),
+    axe('https://app.test/spend'),
+    axe('https://app.test/traces')
+  ])
+  assert.equal(merged.filter((f) => /clipped/i.test(f.title)).length, 3)
+  assert.equal(merged.filter((f) => f.source === 'axe').length, 3)
+})
+
 test('genuinely distinct instances are not merged away', () => {
   const base = { category: 'accessibility' as const, severity: 'major' as const, title: 'No visible focus state',
     detail: 'd', fix: 'f', source: 'heuristic' as const }
@@ -1655,6 +1688,100 @@ test('stuck Connecting + skeletons is a critical flow finding', () => {
   const hit = findings.find((f) => /stuck in loading|Connecting/i.test(f.title))
   assert.ok(hit, 'expected stuck-loading finding')
   assert.equal(hit!.severity, 'critical')
+})
+
+test('bare Loading shell and empty capture are critical', () => {
+  const bare = auditPage(
+    page({
+      url: 'https://app.test/outcomes',
+      signals: {
+        polish: {
+          stuckLoading: true,
+          bareLoadingShell: true,
+          connectingCopy: true,
+          skeletonCount: 0,
+          skeletonWithoutMinHeight: 0,
+          ariaBusyCount: 0,
+          emptyRegionsWithoutCta: 0,
+          vagueEmptyCopy: [],
+          genericCtaLabels: [],
+          disabledWithoutAria: 0
+        },
+        brokenUi: {
+          soft404: false,
+          clippedTextNodes: 0,
+          overlappingTextPairs: 0,
+          mainContentChars: 8
+        }
+      } as CapturedPage['signals']
+    }),
+    config
+  )
+  assert.ok(bare.some((f) => /bare Loading|stuck in loading/i.test(f.title)))
+
+  const empty = auditPage(
+    page({
+      url: 'https://app.test/outcomes',
+      sections: [],
+      controls: [],
+      signals: {
+        brokenUi: {
+          soft404: false,
+          clippedTextNodes: 0,
+          overlappingTextPairs: 0,
+          mainContentChars: 8
+        }
+      } as CapturedPage['signals']
+    }),
+    config
+  )
+  assert.ok(empty.some((f) => /empty shell/i.test(f.title)))
+})
+
+test('auditStaticDocumentTitles flags brand-only titles across routes', () => {
+  const pages = Array.from({ length: 5 }, (_, i) =>
+    page({ url: `https://app.test/p${i}`, title: 'Falnor' })
+  )
+  const hits = auditStaticDocumentTitles(pages)
+  assert.equal(hits.length, 1)
+  assert.match(hits[0].title, /title never changes/i)
+  assert.equal(hits[0].severity, 'major')
+})
+
+test('pickInteractionTargets reserves product list seats', () => {
+  const pages = [
+    page({
+      url: 'https://app.test/agents/dead',
+      signals: {
+        brokenUi: {
+          soft404: true,
+          soft404Evidence: 'Agent not found',
+          clippedTextNodes: 0,
+          overlappingTextPairs: 0,
+          mainContentChars: 40
+        }
+      } as CapturedPage['signals']
+    }),
+    ...Array.from({ length: 8 }, (_, i) => page({ url: `https://app.test/tasks/d${i}` })),
+    page({
+      url: 'https://app.test/spend',
+      controls: Array.from({ length: 20 }, () => ({
+        tag: 'button', type: 'button', role: 'button', text: 'F',
+        placeholder: '', label: '', ariaLabel: '', name: '', href: '', testId: ''
+      }))
+    }),
+    page({
+      url: 'https://app.test/traces',
+      controls: Array.from({ length: 20 }, () => ({
+        tag: 'button', type: 'button', role: 'button', text: 'F',
+        placeholder: '', label: '', ariaLabel: '', name: '', href: '', testId: ''
+      }))
+    })
+  ]
+  const picked = pickInteractionTargets(pages, 8, 3)
+  const paths = picked.map((p) => new URL(p.url).pathname)
+  assert.ok(paths.includes('/spend'), paths.join(', '))
+  assert.ok(paths.includes('/traces'), paths.join(', '))
 })
 
 test('critique priority downranks kit pages and boosts soft-404', () => {

@@ -309,6 +309,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
         disabledWithoutAria?: number
         connectingCopy?: boolean
         stuckLoading?: boolean
+        bareLoadingShell?: boolean
       }
     | null
   if (polish) {
@@ -318,9 +319,13 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
           page,
           'flow',
           'critical',
-          'Page stuck in loading / Connecting state',
-          `Capture still shows connecting/loading copy with ${polish.skeletonCount ?? 0} skeleton placeholder(s). Users see an unfinished shell, not the product.`,
-          'Finish the data load, show a real empty state with recovery CTA, or surface an error with retry — never leave Connecting… + skeletons as the settled UI.',
+          polish.bareLoadingShell && !(polish.skeletonCount && polish.skeletonCount >= 4)
+            ? 'Page stuck on a bare Loading… shell'
+            : 'Page stuck in loading / Connecting state',
+          polish.bareLoadingShell && !(polish.skeletonCount && polish.skeletonCount >= 4)
+            ? `Capture settled on loading copy with almost no content (${page.sections?.length ?? 0} sections, ${page.controls?.length ?? 0} controls). A spinner alone is not a product screen.`
+            : `Capture still shows connecting/loading copy with ${polish.skeletonCount ?? 0} skeleton placeholder(s). Users see an unfinished shell, not the product.`,
+          'Finish the data load, show a real empty state with recovery CTA, or surface an error with retry — never leave Connecting… / Loading… as the settled UI.',
           { effort: 'component', confidence: 'high' }
         )
       )
@@ -678,10 +683,76 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   /* ---- soft-404 shells + clipped / colliding text ---- */
   out.push(...auditBrokenUi(page))
 
+  /* ---- empty capture: no sections, almost no main text (loading hang) ---- */
+  const brokenChars =
+    (page.signals as { brokenUi?: { mainContentChars?: number } } | undefined)?.brokenUi
+      ?.mainContentChars ?? null
+  if (
+    (page.sections?.length ?? 0) === 0 &&
+    (page.controls?.length ?? 0) < 3 &&
+    brokenChars !== null &&
+    brokenChars < 40 &&
+    page.ok
+  ) {
+    const alreadyStuck = out.some((f) => /stuck on a bare Loading|stuck in loading/i.test(f.title))
+    if (!alreadyStuck) {
+      out.push(
+        mk(
+          page,
+          'flow',
+          'critical',
+          'Page captured as an empty shell',
+          `Crawl got HTTP ${page.status} but extracted ${brokenChars} main-content characters with no sections. Typical of a spinner hang or a route that never painted.`,
+          'Wait for real content before considering the route ready, or show a timeout empty/error state with a recovery CTA.',
+          { effort: 'component', confidence: 'high' }
+        )
+      )
+    }
+  }
+
   /* ---- Premium craft (Linear / Stripe bar) ---- */
   out.push(...auditPremiumCraft(page))
 
   return out
+}
+
+/**
+ * SPA apps that never update document.title leave every tab labelled with the
+ * brand alone — bad for tabs, history, and assistive tech.
+ */
+export function auditStaticDocumentTitles(pages: CapturedPage[]): Finding[] {
+  const ok = pages.filter((p) => p.ok)
+  if (ok.length < 4) return []
+  const titles = ok.map((p) => (p.title || '').trim()).filter(Boolean)
+  if (titles.length < 4) return []
+  const counts = new Map<string, number>()
+  for (const t of titles) counts.set(t.toLowerCase(), (counts.get(t.toLowerCase()) ?? 0) + 1)
+  let top = ''
+  let topN = 0
+  for (const [t, n] of counts) {
+    if (n > topN) {
+      top = t
+      topN = n
+    }
+  }
+  if (topN < Math.ceil(ok.length * 0.75)) return []
+  const sample = ok.find((p) => (p.title || '').trim().toLowerCase() === top) ?? ok[0]
+  const display = sample.title?.trim() || top
+  return [
+    {
+      id: `f${++counter}`,
+      category: 'content',
+      severity: 'major',
+      title: 'Document title never changes across routes',
+      detail: `${topN}/${ok.length} captured pages share the title “${display}”. Browser tabs, history, and screen-reader page announcements cannot tell routes apart.`,
+      fix: 'Set document.title (or <title>) per route: “Tasks — Brand”, “CLM-1042 — Brand”. Keep the brand last so the unique part is visible in the tab.',
+      pageUrl: sample.url,
+      source: 'heuristic',
+      effort: 'component',
+      confidence: 'high',
+      affectedPages: topN
+    }
+  ]
 }
 
 /**
@@ -691,7 +762,18 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
  * sizes", "z-index max 999999999"). Reporting them per page is noise, and it
  * multiplies the scoring penalty by the number of pages crawled — which is how
  * a site scored worse simply for being crawled more deeply.
+ *
+ * Page-local layout / a11y / interaction defects must NOT merge — otherwise
+ * /chat overlap and /templates clip vanish behind /knowledge's worse count.
  */
+export function isPageLocalFinding(f: Finding): boolean {
+  if (f.source === 'axe' || f.source === 'pa11y' || f.source === 'ai') return true
+  if (f.sectionId || f.viewport || f.selector) return true
+  return /clipped or overflowing|overlapping text|not-found|missing-record|skeleton placeholder|stuck in loading|stuck on a bare Loading|empty shell|no hover feedback|dead click|no visible focus|focus state|fake button|accessible name|empty region/i.test(
+    f.title
+  )
+}
+
 export function dedupeFindings(findings: Finding[]): Finding[] {
   const groups = new Map<string, Finding[]>()
   for (const f of findings) {
@@ -700,9 +782,16 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
     // Titles that differ only by their number ("29 distinct colours" vs "15
     // distinct colours") are the same defect measured on different pages.
     // Keying on the numberless shape merges them into one finding instead of
-    // billing the same root cause four times.
+    // billing the same root cause four times — except for page-local defects.
     const shape = f.title.replace(/\d+(\.\d+)?%?/g, '#')
-    const key = [f.category, shape, f.sectionId ?? '', f.viewport ?? '', f.selector ?? ''].join('|')
+    const key = [
+      f.category,
+      shape,
+      f.sectionId ?? '',
+      f.viewport ?? '',
+      f.selector ?? '',
+      isPageLocalFinding(f) ? f.pageUrl : ''
+    ].join('|')
     const list = groups.get(key)
     if (list) list.push(f)
     else groups.set(key, [f])

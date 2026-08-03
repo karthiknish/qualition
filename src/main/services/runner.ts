@@ -5,7 +5,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Browser } from 'playwright'
 import { capturePage, crawl, launch, runFlow, DEFAULT_VIEWPORTS } from './crawler.js'
-import { auditPage, dedupeFindings, diffFindingsAgainstPrior, fixedFindingsSincePrior, scoreRun, themeSummary } from './audit.js'
+import { auditPage, dedupeFindings, diffFindingsAgainstPrior, fixedFindingsSincePrior, scoreRun, themeSummary, auditStaticDocumentTitles } from './audit.js'
 import { auditBrandAcrossProject, auditComponentTheme, inferBrandProfile } from './brandTheme.js'
 import { findingsFromFlowGaps, flowGapsFromMobbin, flowsSuggestedByMobbinGaps } from './flowGaps.js'
 import { critiquePage, critiqueSectionAgainstReferences, finalVerdict, makeCritic, proposeFlows } from './critic.js'
@@ -26,7 +26,7 @@ import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
 import { applyProductionPresence, partitionProductFindings } from './provenance.js'
-import { interactionProbeScore, isKitSpecimenPath, pickCritiqueTargets } from './brokenUi.js'
+import { isKitSpecimenPath, pickCritiqueTargets, pickInteractionTargets } from './brokenUi.js'
 import { summarizePremiumCraft, type PremiumDimensionScores } from './premiumCraft.js'
 import { mapPool } from './pool.js'
 import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
@@ -274,6 +274,7 @@ export async function executeRun(
       findings.push(...auditComponentTheme(page, brand, cfg))
     }
     findings.push(...auditBrandAcrossProject(run.pages, brand, cfg))
+    findings.push(...auditStaticDocumentTitles(run.pages))
     run.findings = findings
     run.themeSummary = [themeSummary(run.pages), brand.summary !== 'insufficient brand signal' ? `Brand: ${brand.summary}` : '']
       .filter(Boolean)
@@ -400,36 +401,11 @@ export async function executeRun(
       const PROBE_PAGE_CAP = 8
       const PROBE_CONCURRENCY = 2
       const PROBE_BUDGET_MS = 60_000
-      const rankedProbe = [...run.pages].sort(
-        (a, b) => interactionProbeScore(b) - interactionProbeScore(a)
-      )
-      const probeTargets: typeof run.pages = []
-      const seen = new Set<string>()
-      // Always include at least one shallow product list when available.
-      for (const page of rankedProbe) {
-        if (probeTargets.length >= PROBE_PAGE_CAP) break
-        let depth = 0
-        try {
-          depth = new URL(page.url).pathname.split('/').filter(Boolean).length
-        } catch {
-          /* ignore */
-        }
-        if (depth === 1 && !isKitSpecimenPath(page.url) && !seen.has(page.url)) {
-          probeTargets.push(page)
-          seen.add(page.url)
-          break
-        }
-      }
-      for (const page of rankedProbe) {
-        if (probeTargets.length >= PROBE_PAGE_CAP) break
-        if (seen.has(page.url)) continue
-        seen.add(page.url)
-        probeTargets.push(page)
-      }
+      const probeTargets = pickInteractionTargets(run.pages, PROBE_PAGE_CAP, 3)
       if (run.pages.length > PROBE_PAGE_CAP) {
         log(
           'info',
-          `Interaction probe capped at ${PROBE_PAGE_CAP} risk-ranked page(s) (of ${run.pages.length}); concurrency ${PROBE_CONCURRENCY}`
+          `Interaction probe capped at ${PROBE_PAGE_CAP} page(s) incl. reserved product lists (of ${run.pages.length}); concurrency ${PROBE_CONCURRENCY}`
         )
       }
       progress('interaction', 44, `Probing ${probeTargets.length} page(s) (×${PROBE_CONCURRENCY})`)

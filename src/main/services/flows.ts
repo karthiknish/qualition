@@ -423,21 +423,25 @@ export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps:
         })
       }
       // Prefer a real in-page control when the crawl saw one — proves interactivity
-      // beyond "the URL loaded". Never pick sidebar brand / Overview / Ask …
-      const actionLabel = (d.page.controls ?? [])
+      // beyond "the URL loaded". Prefer record chrome (Approve, Open workflow…)
+      // over generic buttons. Never pick sidebar brand / Overview / Ask …
+      const RECORD_ACTION =
+        /^(approve|keep waiting|open workflow|open task|open review|stop this run|send back|park for human|claim\b|view steps|continue|resume)/i
+      const labels = (d.page.controls ?? [])
+        .filter(
+          (c) =>
+            c.tag === 'button' || c.role === 'button' || c.type === 'submit'
+        )
         .map((c) => (c.text || c.ariaLabel || '').trim())
-        .find(
+        .filter(
           (l) =>
             l.length > 1 &&
-            l.length < 28 &&
+            l.length < 36 &&
             !UNSAFE.test(l) &&
-            !isSiteChromeLabel(l, ok) &&
-            (d.page.controls ?? []).some(
-              (c) =>
-                norm(c.text || c.ariaLabel || '') === norm(l) &&
-                (c.tag === 'button' || c.role === 'button' || c.type === 'submit')
-            )
+            !isSiteChromeLabel(l, ok)
         )
+      const actionLabel =
+        labels.find((l) => RECORD_ACTION.test(l)) || labels[0]
       if (actionLabel) {
         steps.push({
           action: 'click',
@@ -445,6 +449,14 @@ export function detailRecordFlows(pages: CapturedPage[]): { name: string; steps:
           intent: `Activate “${actionLabel}” on the detail`
         })
         steps.push({ action: 'wait', value: '800', intent: 'Wait for detail interaction' })
+        const after = assertionFor(d.page, ok)
+        if (after && after !== detailAssert) {
+          steps.push({
+            action: 'assertText',
+            value: after,
+            intent: `Confirm UI still shows “${after}” after click`
+          })
+        }
       }
     }
     if (steps.filter((s) => s.action === 'goto').length < 2) continue
