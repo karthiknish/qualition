@@ -43,6 +43,7 @@ import {
   stableSelector,
   trimEvidence
 } from '../src/main/services/prompt.js'
+import { isAllowedRegistryRecommendation } from '../src/main/services/registryPolicy.js'
 
 const config: RunConfig = {
   targetUrl: 'https://example.com',
@@ -2259,11 +2260,27 @@ test('formatRecommendations prefers unique components over dashboard shells', ()
           },
           {
             name: 'command',
-            registry: '@cult-ui',
+            registry: '@kibo-ui',
             type: 'registry:ui',
             description: 'Command menu',
-            addCommand: 'npx shadcn@latest add @cult-ui/command',
+            addCommand: 'npx shadcn@latest add @kibo-ui/command',
             source: 'shoogle'
+          },
+          {
+            name: 'carousel',
+            registry: '@cult-ui',
+            type: 'registry:ui',
+            description: 'Marketing carousel',
+            addCommand: 'npx shadcn@latest add @cult-ui/carousel',
+            source: 'shoogle'
+          },
+          {
+            name: 'chart',
+            registry: '@shadcn',
+            type: 'registry:ui',
+            description: 'Recharts chart',
+            addCommand: 'npx shadcn@latest add chart',
+            source: 'shadcn'
           }
         ]
       }
@@ -2272,7 +2289,9 @@ test('formatRecommendations prefers unique components over dashboard shells', ()
     interactions: [],
     log: []
   } as Run)
-  assert.ok(text.includes('npx shadcn@latest add empty') || text.includes('@cult-ui/command'))
+  assert.ok(text.includes('npx shadcn@latest add empty') || text.includes('@kibo-ui/command'))
+  assert.equal(text.includes('@cult-ui'), false, 'cult-ui must be stripped by registry policy')
+  assert.equal(text.includes('add chart'), false, 'shadcn chart / recharts must be stripped')
   assert.equal(text.includes('@shadcnblocks/dashboard-01'), false, 'dashboard shells must be stripped')
   assert.equal(text.includes('@reui/dashboard-8'), false, 'reui dashboard shells must be stripped')
   assert.equal(text.includes('npx shadcn@latest add button'), false, 'basic button must not be suggested')
@@ -2280,8 +2299,51 @@ test('formatRecommendations prefers unique components over dashboard shells', ()
   assert.ok(text.includes('do not install a dashboard block'), 'detail guidance for component swaps')
   assert.ok(text.includes('· /'), 'recs should include pathname where applied')
   // One family only — not three command-menu registries.
-  const commandHits = (text.match(/command-menu|add command\b/gi) ?? []).length
+  const commandHits = (text.match(/command-menu|add command\b|@kibo-ui\/command/gi) ?? []).length
   assert.ok(commandHits <= 2, `expected at most one command family suggestion, got ${commandHits}`)
+})
+
+test('registry policy bans cult-ui and recharts chart installs', () => {
+  assert.equal(
+    isAllowedRegistryRecommendation({
+      name: 'carousel',
+      registry: '@cult-ui',
+      addCommand: 'npx shadcn@latest add @cult-ui/carousel'
+    }),
+    false
+  )
+  assert.equal(
+    isAllowedRegistryRecommendation({
+      name: 'chart',
+      registry: '@shadcn',
+      description: 'Recharts-backed chart'
+    }),
+    false
+  )
+  assert.equal(
+    isAllowedRegistryRecommendation({
+      name: 'stats-12',
+      registry: '@blocks',
+      description: 'KPI with recharts sparkline'
+    }),
+    false
+  )
+  assert.equal(
+    isAllowedRegistryRecommendation({
+      name: 'empty',
+      registry: '@shadcn',
+      addCommand: 'npx shadcn@latest add empty'
+    }),
+    true
+  )
+  assert.equal(
+    isAllowedRegistryRecommendation({
+      name: 'timescale',
+      registry: '@ncdai',
+      addCommand: 'npx shadcn@latest add @ncdai/timescale'
+    }),
+    true
+  )
 })
 
 /* ------------------------------ fix prompts ------------------------------ */

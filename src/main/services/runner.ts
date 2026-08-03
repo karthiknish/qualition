@@ -723,7 +723,7 @@ export async function executeRun(
           },
           { shouldStop: () => state.cancelled }
         )
-        for (const rec of recs) if (rec) run.recommendations.push(rec)
+        for (const rec of recs) if (rec?.items?.length) run.recommendations.push(rec)
       } catch (e) {
         if ((e as Error).message === 'cancelled' || (e as Error).name === 'CancelledError') {
           throw new CancelledError()

@@ -11,6 +11,7 @@
  * Extra registries (registry.json / index.json shaped) can be added in Settings.
  */
 import { shoogleForSection, shoogleAddCommand } from './shoogle.js'
+import { filterRegistryRecommendations, isAllowedRegistryRecommendation } from './registryPolicy.js'
 import { gapsFromMobbin, isFullPageShell, pickUniqueComponents, componentFamily } from './componentGaps.js'
 import type { ComponentRecommendation, MobbinReference, PageSection, SectionRole } from '../../shared/types.js'
 
@@ -195,7 +196,9 @@ export async function recommendForSection(
     shoogleAttempted = true
     try {
       const raw = await shoogleForSection(section.role, section, problems, 10, gapQueries)
-      const unique = pickUniqueComponents(raw, { section, gapFamilies, limit: 3 })
+      const unique = pickUniqueComponents(raw, { section, gapFamilies, limit: 6 })
+        .filter(isAllowedRegistryRecommendation)
+        .slice(0, 3)
       for (const it of unique) {
         out.push({
           name: it.name,
@@ -221,17 +224,21 @@ export async function recommendForSection(
     const more = pickUniqueComponents(fallback, {
       section,
       gapFamilies,
-      limit: shadcnSlots,
+      limit: shadcnSlots + 2,
       allowBasic: false
-    })
+    }).filter(isAllowedRegistryRecommendation)
     // Skip families already chosen from Shoogle.
     const taken = new Set(out.map((i) => componentFamily(i.name)))
     for (const it of more) {
       if (taken.has(componentFamily(it.name))) continue
       out.push(it)
       taken.add(componentFamily(it.name))
+      if (out.length >= 3) break
     }
   }
+
+  const filtered = filterRegistryRecommendations(out).slice(0, 3)
+  const filteredShoogle = filtered.filter((i) => i.source === 'shoogle').length
 
   const gapNote =
     gaps.length > 0
@@ -244,7 +251,7 @@ export async function recommendForSection(
         : ''
 
   const communityNote =
-    shoogleCount > 0
+    filteredShoogle > 0
       ? 'One best match per component family (not multiple registries of the same widget). '
       : shoogleAttempted
         ? 'Shoogle returned no unique component hits — falling back to first-party shadcn for gaps only. '
@@ -260,8 +267,13 @@ export async function recommendForSection(
     pageUrl,
     sectionRole: section.role,
     reason: reason.trim(),
-    source: shoogleCount > 0 && out.some((i) => i.source === 'shadcn') ? 'mixed' : shoogleCount > 0 ? 'shoogle' : 'shadcn',
-    items: out.slice(0, 3)
+    source:
+      filteredShoogle > 0 && filtered.some((i) => i.source === 'shadcn')
+        ? 'mixed'
+        : filteredShoogle > 0
+          ? 'shoogle'
+          : 'shadcn',
+    items: filtered
   }
 }
 

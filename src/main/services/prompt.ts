@@ -9,6 +9,7 @@
 import type { ComponentRecommendation, Finding, Run, Severity } from '../../shared/types.js'
 import { sortFindingsForBrief } from './audit.js'
 import { componentFamily, isDetailPath, isFullPageShell, isBasicPrimitive } from './componentGaps.js'
+import { isAllowedRegistryRecommendation } from './registryPolicy.js'
 
 const SEVERITY_ORDER: Severity[] = ['blocker', 'critical', 'major', 'minor', 'nit']
 
@@ -328,7 +329,12 @@ export function formatRecommendations(
   const usable = recs
     .map((r) => ({
       ...r,
-      items: r.items.filter((i) => !isFullPageShell(i.name, i.type, i.description) && !isBasicPrimitive(i.name))
+      items: r.items.filter(
+        (i) =>
+          isAllowedRegistryRecommendation(i) &&
+          !isFullPageShell(i.name, i.type, i.description) &&
+          !isBasicPrimitive(i.name)
+      )
     }))
     .filter((r) => r.items.length > 0)
 

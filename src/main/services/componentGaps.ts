@@ -52,9 +52,10 @@ const GAP_PATTERNS: { id: string; mobbin: RegExp; query: string; present: RegExp
   {
     id: 'chart',
     mobbin: /\b(line|bar|area|donut|pie) chart\b|\bsparkline\b|\banalytic/i,
-    query: 'chart',
+    query: 'chart kpi sparkline',
     present: /\bchart\b|\bsparkline\b/i,
-    shadcn: ['chart']
+    // Never suggest shadcn `chart` (Recharts). Charts stay Visx / product-owned.
+    shadcn: []
   },
   {
     id: 'kpi',
