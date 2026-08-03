@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CapturedPage, Finding, Run, RunProgress, Severity } from '../../../shared/types'
-import { api, CATEGORY_LABEL, cx, gradeColor, SEVERITY_COLOR } from '../lib/api'
+import { api, CATEGORY_LABEL, cx, formatDuration, gradeColor, SEVERITY_COLOR } from '../lib/api'
 import { Badge, Bar, Button, Chip, Empty, Panel } from '../components/ui'
 
 type Tab =
@@ -34,6 +34,14 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
   const [sevFilter, setSevFilter] = useState<Severity | 'all'>('all')
   const [catFilter, setCatFilter] = useState<string>('all')
   const [pageIdx, setPageIdx] = useState(0)
+  const live = !!run && (run.status === 'running' || run.status === 'queued')
+  const [tick, setTick] = useState(Date.now())
+
+  useEffect(() => {
+    if (!live) return
+    const id = window.setInterval(() => setTick(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [live, run?.id])
 
   if (!run) {
     return (
@@ -42,6 +50,9 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
       </div>
     )
   }
+
+  const elapsedMs = (run.finishedAt ?? (live ? tick : run.createdAt)) - run.createdAt
+  const elapsedLabel = formatDuration(elapsedMs)
 
   const page: CapturedPage | undefined = run.pages[pageIdx]
   const findings = run.findings
@@ -68,6 +79,18 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
           <h1 className="truncate text-[22px] font-semibold tracking-tight text-zinc-50">{run.config.targetUrl}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-zinc-500">
             <Badge className={statusBadge}>{run.status}</Badge>
+            <span
+              className={cx(
+                'rounded-md border px-1.5 py-0.5 font-mono text-[12px] tabular-nums',
+                live
+                  ? 'border-sky-500/30 bg-sky-500/10 text-sky-200'
+                  : 'border-zinc-800 bg-zinc-900 text-zinc-300'
+              )}
+              title={live ? 'Elapsed time' : 'Total analysis time'}
+            >
+              {elapsedLabel}
+              {live ? '' : ' total'}
+            </span>
             <span className="tabular-nums text-zinc-600">{run.id}</span>
             <span className="text-zinc-700">·</span>
             <span>
@@ -97,7 +120,10 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
               <span className="h-1.5 w-1.5 animate-pulse-soft rounded-full bg-sky-400" />
               {progress.phase}
             </span>
-            <span className="tabular-nums text-zinc-400">{progress.pct}%</span>
+            <span className="flex items-center gap-3 tabular-nums text-zinc-400">
+              <span className="font-mono text-sky-200">{elapsedLabel}</span>
+              <span>{progress.pct}%</span>
+            </span>
           </div>
           <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
             <div

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { IntegrationStatus, Run, RunProgress } from '../../shared/types'
-import { api, cx } from './lib/api'
+import { api, cx, formatDuration } from './lib/api'
 import NewRun from './views/NewRun'
 import Runs from './views/Runs'
 import Report from './views/Report'
@@ -54,6 +54,13 @@ export default function App(): JSX.Element {
     [runs, activeId]
   )
   const running = runs.find((r) => r.status === 'running' || r.status === 'queued')
+  const [now, setNow] = useState(Date.now())
+
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [running?.id])
 
   useEffect(() => {
     if (cancelling && !runs.some((r) => r.id === cancelling && (r.status === 'running' || r.status === 'queued'))) {
@@ -132,9 +139,14 @@ export default function App(): JSX.Element {
                     />
                     {progress?.phase ?? 'running'}
                   </span>
-                  <span className="tabular-nums">{progress?.pct ?? 0}%</span>
+                  <span className="font-mono tabular-nums text-zinc-300">
+                    {formatDuration(now - running.createdAt)}
+                  </span>
                 </div>
-                <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
+                <div className="mt-1.5 flex items-center justify-end text-[10px] tabular-nums text-zinc-600">
+                  {progress?.pct ?? 0}%
+                </div>
+                <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-zinc-800">
                   <div
                     className={cx(
                       'h-full rounded-full transition-all duration-300',

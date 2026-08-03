@@ -9,7 +9,7 @@ import { detectArchetype, queryForSection } from '../src/main/services/archetype
 import { analyzeCss, auditCss } from '../src/main/services/cssAudit.js'
 import { diffScreenshots } from '../src/main/services/visual.js'
 import { Deadline, shouldEmitKeyboardUnreachable } from '../src/main/services/interaction.js'
-import { isValidTarget, normalizeTargetUrl, schemeFallback, isLocalHost } from '../src/shared/url.js'
+import { isValidTarget, normalizeTargetUrl, schemeFallback, isLocalHost, parseIgnorePages, isIgnoredPage } from '../src/shared/url.js'
 import { loginUrlGuesses, passwordCandidates, redactAuth, usernameCandidates } from '../src/main/services/auth.js'
 import { cancelRun, executeRun, isCancelled, newRun } from '../src/main/services/runner.js'
 import { deleteCredential, listCredentials, originOf, resolveCredential, saveCredential } from '../src/main/services/vault.js'
@@ -621,6 +621,17 @@ test('scheme fallback only applies to local hosts', () => {
   assert.equal(schemeFallback('https://stripe.com/'), null)
   assert.equal(isLocalHost('192.168.1.20'), true)
   assert.equal(isLocalHost('stripe.com'), false)
+})
+
+test('ignore page patterns match paths, prefixes, wildcards and full URLs', () => {
+  assert.deepEqual(parseIgnorePages('/login\n/settings/*, /admin'), ['/login', '/settings/*', '/admin'])
+  const pats = ['/login', '/settings', '/docs/*', 'http://localhost:5173/legacy']
+  assert.equal(isIgnoredPage('http://localhost:5173/login', pats), true)
+  assert.equal(isIgnoredPage('http://localhost:5173/settings/profile', pats), true)
+  assert.equal(isIgnoredPage('http://localhost:5173/docs/api/v1', pats), true)
+  assert.equal(isIgnoredPage('http://localhost:5173/legacy/old', pats), true)
+  assert.equal(isIgnoredPage('http://localhost:5173/dashboard', pats), false)
+  assert.equal(isIgnoredPage('http://localhost:5173/', pats), false)
 })
 
 /* ---------------------------------- auth ---------------------------------- */
@@ -1616,6 +1627,80 @@ test('auditPage flags padding and layout mismatches from signals', () => {
   assert.ok(findings.some((f) => /different gaps between bands/i.test(f.title)))
   assert.ok(findings.some((f) => /uneven padding/i.test(f.title)))
   assert.ok(findings.some((f) => /distinct padding values/i.test(f.title)))
+})
+
+test('auditPage flags product-polish empty/loading/microcopy signals', () => {
+  const findings = auditPage(
+    page({
+      url: 'https://example.com/app',
+      signals: {
+        polish: {
+          emptyRegionsWithoutCta: 2,
+          vagueEmptyCopy: ['No data', 'Nothing here'],
+          genericCtaLabels: ['Submit', 'Click here', 'Learn more'],
+          skeletonCount: 4,
+          skeletonWithoutMinHeight: 3,
+          ariaBusyCount: 0,
+          disabledWithoutAria: 0
+        }
+      }
+    }),
+    config
+  )
+  assert.ok(findings.some((f) => /empty region.*without a next-step CTA/i.test(f.title)))
+  assert.ok(findings.some((f) => /Vague empty copy/i.test(f.title)))
+  assert.ok(findings.some((f) => /Generic CTA labels/i.test(f.title)))
+  assert.ok(findings.some((f) => /skeleton.*without reserved height/i.test(f.title)))
+})
+
+test('pickSectionsForRecommendations skips mature unique sections', async () => {
+  const { shouldRecommendReplacement, pickSectionsForRecommendations } = await import(
+    '../src/main/services/shadcnRegistry.js'
+  )
+  const mature = {
+    id: 'hero',
+    role: 'hero' as const,
+    roleConfidence: 0.9,
+    label: 'Hero',
+    selector: 'section.hero',
+    rect: { x: 0, y: 0, width: 1200, height: 480 },
+    textPreview: 'Ship faster with Qualition audits that catch polish debt before release.',
+    headings: ['Ship faster'],
+    ctaLabels: ['Start audit'],
+    components: [],
+    stats: {
+      interactiveCount: 2,
+      imageCount: 1,
+      textDensity: 2,
+      distinctBgColors: 2,
+      distinctFontSizes: 3,
+      maxTextWidthPx: 640
+    }
+  }
+  const gate = shouldRecommendReplacement(mature, { problems: [], roleCountOnPage: 1 })
+  assert.equal(gate.yes, false)
+
+  const clones = Array.from({ length: 5 }, (_, i) => ({
+    ...mature,
+    id: `c${i}`,
+    role: 'content' as const,
+    roleConfidence: 0.4,
+    label: `Blob ${i}`,
+    textPreview: '…',
+    headings: [] as string[],
+    ctaLabels: [] as string[],
+    rect: { x: 0, y: i * 240, width: 1200, height: 240 }
+  }))
+  const picks = pickSectionsForRecommendations(
+    'https://example.com/',
+    clones,
+    [{ sectionId: 'c0', pageUrl: 'https://example.com/', severity: 'major', title: 'Weak hierarchy' }],
+    6
+  )
+  assert.ok(picks.length >= 1)
+  assert.ok(picks.every((p) => p.reasons.length > 0))
+  // One recommendation per repeated role, not five clones.
+  assert.equal(picks.filter((p) => p.reasons.includes('repeated-role')).length, 1)
 })
 
 test('partitionProductFindings excludes Agentation selectors from product grade', async () => {

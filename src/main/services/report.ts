@@ -8,7 +8,21 @@ export function renderMarkdownReport(run: Run): string {
   const lines: string[] = []
   lines.push(`# Qualition audit — ${run.config.targetUrl}`)
   lines.push('')
-  lines.push(`Run \`${run.id}\` · ${new Date(run.createdAt).toLocaleString()} · brutality: **${run.config.brutality}** · pages: ${run.pages.length}`)
+  const duration =
+    run.finishedAt != null
+      ? (() => {
+          const total = Math.max(0, Math.floor((run.finishedAt - run.createdAt) / 1000))
+          const h = Math.floor(total / 3600)
+          const m = Math.floor((total % 3600) / 60)
+          const sec = total % 60
+          return h > 0
+            ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+            : `${m}:${String(sec).padStart(2, '0')}`
+        })()
+      : null
+  lines.push(
+    `Run \`${run.id}\` · ${new Date(run.createdAt).toLocaleString()}${duration ? ` · duration: **${duration}**` : ''} · brutality: **${run.config.brutality}** · pages: ${run.pages.length}`
+  )
   lines.push('')
   if (s) {
     lines.push(`## Verdict — ${s.grade} (${s.overall}/100)`)

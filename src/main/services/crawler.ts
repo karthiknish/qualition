@@ -12,7 +12,7 @@ import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
 import { DEV_CHROME_EXCLUDE_LIST, hideDevChrome, installDevChromeGuard } from './devChrome.js'
 import { configurePlaywrightBrowsersPath } from './browsers.js'
-import { normalizeTargetUrl, schemeFallback } from '../../shared/url.js'
+import { normalizeTargetUrl, schemeFallback, isIgnoredPage } from '../../shared/url.js'
 import type {
   AxeViolation,
   CapturedPage,
@@ -133,6 +133,8 @@ export interface CaptureOptions {
   budgetMs?: number
   /** Cooperative stop (cancellation) checked between pages. */
   shouldStop?: () => boolean
+  /** Path/URL patterns to skip (never captured). Seed URL is always kept. */
+  ignorePages?: string[]
   onLog?: (msg: string) => void
 }
 
@@ -632,6 +634,8 @@ export async function crawl(
   let innersFound = 0
 
   if (unlimited) opts.onLog?.('crawling every reachable same-origin route (no page limit)')
+  const ignore = opts.ignorePages?.filter(Boolean) ?? []
+  if (ignore.length) opts.onLog?.(`ignoring ${ignore.length} page pattern(s): ${ignore.join(', ')}`)
 
   while (queue.length && pages.length < pageLimit) {
     if (Date.now() > deadline) {
@@ -647,6 +651,12 @@ export async function crawl(
     if (visited.has(url) || seenPaths.has(identity)) continue
     visited.add(url)
     seenPaths.add(identity)
+
+    // Never skip the seed URL — ignore only applies to discovered routes.
+    if (url !== first && ignore.length && isIgnoredPage(url, ignore)) {
+      opts.onLog?.(`skipping ignored page ${url}`)
+      continue
+    }
 
     opts.onLog?.(`capturing ${url}`)
     const page = await capturePage(browser, url, opts)
@@ -680,6 +690,7 @@ export async function crawl(
       .filter((l) => !visited.has(l) && !seenPaths.has(pageIdentity(l)))
       .filter((l) => !/\.(pdf|zip|png|jpe?g|svg|webp|gif|mp4|dmg|exe|css|js|xml|txt|rss)$/i.test(l))
       .filter((l) => !/\/(cdn-cgi|api|_next|static|assets)\//i.test(l))
+      .filter((l) => !(ignore.length && isIgnoredPage(l, ignore)))
 
     // One entry per distinct path, highest value first.
     const byPath = new Map<string, string>()

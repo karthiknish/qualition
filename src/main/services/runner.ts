@@ -15,7 +15,7 @@ import { modelFor } from '../../shared/types.js'
 import { closeMobbin, searchScreens, searchSections, searchFlows } from './mobbin.js'
 import { detectArchetype, queryForFlows, queryForSection, refineRoles } from './archetype.js'
 import { closeShoogle } from './shoogle.js'
-import { recommendForSection } from './shadcnRegistry.js'
+import { recommendForSection, pickSectionsForRecommendations } from './shadcnRegistry.js'
 import { auditCss } from './cssAudit.js'
 import { auditTokens } from './tokens.js'
 import { compareWithBaseline } from './visual.js'
@@ -233,6 +233,7 @@ export async function executeRun(
       // cannot trap the run indefinitely.
       budgetMs: unlimited ? 45 * 60_000 : undefined,
       shouldStop: () => state.cancelled,
+      ignorePages: cfg.ignorePages,
       onPage: (p) => {
         run.pages.push(p)
         progress(
@@ -515,24 +516,32 @@ export async function executeRun(
       log('warn', `AI critique enabled but ${cfg.provider} is not configured — skipped.`)
     }
 
-    /* 5. registry recommendations per section (Shoogle community first, shadcn fallback) */
+    /* 5. registry recommendations — only immature / heavily repeated sections */
     if (cfg.useShadcn) {
-      progress('components', 78, 'Matching sections to Shoogle community registries + shadcn')
+      progress('components', 78, 'Matching weak/repeated sections to Shoogle + shadcn')
+      let skippedMature = 0
       for (const page of run.pages) {
-        for (const s of page.sections) {
+        checkpoint()
+        const picks = pickSectionsForRecommendations(page.url, page.sections, run.findings, 6)
+        skippedMature += Math.max(0, page.sections.length - picks.length)
+        for (const pick of picks) {
           checkpoint()
-          const problems = run.findings
-            .filter((f) => f.sectionId === s.id && f.pageUrl === page.url)
-            .map((f) => f.title)
           try {
-            run.recommendations.push(await raceCancel(recommendForSection(s, problems, settings.extraRegistries, true)))
+            const rec = await raceCancel(
+              recommendForSection(pick.section, pick.problems, settings.extraRegistries, true)
+            )
+            rec.reason = `[${pick.reasons.join(', ')}] ${rec.reason}`
+            run.recommendations.push(rec)
           } catch (e) {
             if (state.cancelled) throw new CancelledError()
-            log('warn', `registry (${s.role}): ${(e as Error).message}`)
+            log('warn', `registry (${pick.section.role}): ${(e as Error).message}`)
           }
         }
       }
       const shoogleBacked = run.recommendations.filter((r) => r.source !== 'shadcn').length
+      if (skippedMature > 0) {
+        log('info', `Skipped Shoogle/shadcn for ${skippedMature} mature/unique section(s)`)
+      }
       progress(
         'components',
         84,

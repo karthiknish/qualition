@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { FlowStep, IntegrationStatus, Run, RunConfig, SavedCredential, Settings, Viewport } from '../../../shared/types'
 import { api, cx } from '../lib/api'
-import { isValidTarget, normalizeTargetUrl } from '../../../shared/url'
+import { isValidTarget, normalizeTargetUrl, parseIgnorePages } from '../../../shared/url'
 import { Button, Chip, Input, PageHeader, Panel, Segmented, Toggle } from '../components/ui'
 
 const BRUTALITY: { id: RunConfig['brutality']; label: string; hint: string }[] = [
@@ -21,6 +21,7 @@ export default function NewRun({
   const [viewports, setViewports] = useState<Viewport[]>([])
   const [enabledVps, setEnabledVps] = useState<Record<string, boolean>>({})
   const [url, setUrl] = useState('https://')
+  const [ignorePages, setIgnorePages] = useState('')
   const [context, setContext] = useState('')
   const [maxPages, setMaxPages] = useState(5)
   const [brutality, setBrutality] = useState<RunConfig['brutality']>('ruthless')
@@ -91,6 +92,7 @@ export default function NewRun({
         targetUrl: normalizeTargetUrl(url) ?? url.trim(),
         productionUrl: productionUrl.trim() ? normalizeTargetUrl(productionUrl) ?? productionUrl.trim() : undefined,
         maxPages,
+        ignorePages: parseIgnorePages(ignorePages),
         viewports: viewports.filter((v) => enabledVps[v.name]),
         useMobbin,
         useShadcn,
@@ -146,6 +148,21 @@ export default function NewRun({
               will audit <span className="text-zinc-300">{normalized}</span>
             </p>
           )}
+          <div>
+            <label className="mb-1 block text-[12px] text-zinc-400">Ignore pages</label>
+            <textarea
+              value={ignorePages}
+              onChange={(e) => setIgnorePages(e.target.value)}
+              rows={2}
+              spellCheck={false}
+              placeholder={'/login\n/settings/*\n/admin'}
+              className="w-full rounded-xl border border-zinc-800 bg-zinc-950/80 px-3 py-2 font-mono text-[12px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-zinc-500 focus:bg-zinc-950"
+            />
+            <p className="mt-1 text-[11px] leading-snug text-zinc-600">
+              Paths or URLs to skip (one per line or comma-separated). Prefixes match children;{' '}
+              <code className="text-zinc-500">*</code> is a wildcard. The start URL is always captured.
+            </p>
+          </div>
           <Input
             value={productionUrl}
             onChange={setProductionUrl}

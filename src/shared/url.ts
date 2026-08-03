@@ -67,3 +67,65 @@ export function schemeFallback(url: string): string | null {
     return null
   }
 }
+
+/** Split a New Run ignore field into patterns (comma or newline separated). */
+export function parseIgnorePages(text: string): string[] {
+  return text
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * True when `url` should be skipped during crawl/audit.
+ * Patterns are path prefixes (`/settings`, `/admin`), wildcards (`/docs/*`),
+ * or full URL prefixes (`http://localhost:5173/legacy`).
+ */
+export function isIgnoredPage(url: string, patterns: string[] | undefined | null): boolean {
+  if (!patterns?.length) return false
+  let path: string
+  let hrefNoHash: string
+  try {
+    const u = new URL(url)
+    path = u.pathname.replace(/\/+$/, '') || '/'
+    hrefNoHash = `${u.origin}${path}${u.search}`
+  } catch {
+    path = url
+    hrefNoHash = url
+  }
+
+  for (const raw of patterns) {
+    const p = raw.trim()
+    if (!p) continue
+
+    if (/^https?:\/\//i.test(p)) {
+      try {
+        const want = new URL(p)
+        const wantPath = want.pathname.replace(/\/+$/, '') || '/'
+        const wantBase = `${want.origin}${wantPath}`
+        if (hrefNoHash === wantBase || hrefNoHash.startsWith(wantBase + '/') || hrefNoHash.startsWith(wantBase + '?')) {
+          return true
+        }
+      } catch {
+        if (hrefNoHash.startsWith(p.replace(/\/$/, ''))) return true
+      }
+      continue
+    }
+
+    let pat = p.startsWith('/') ? p : `/${p}`
+    pat = pat.replace(/\/+$/, '') || '/'
+
+    if (pat.includes('*')) {
+      const re = new RegExp(`^${pat.split('*').map(escapeRegex).join('.*')}(?:/)?(?:\\?.*)?$`, 'i')
+      if (re.test(path) || re.test(`${path}/`)) return true
+      continue
+    }
+
+    if (path === pat || path.startsWith(`${pat}/`)) return true
+  }
+  return false
+}

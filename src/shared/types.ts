@@ -459,6 +459,11 @@ export interface RunConfig {
   /** Optional production URL for a lightweight second pass (provenance / CSS weight). */
   productionUrl?: string
   maxPages: number
+  /**
+   * Path/URL patterns to skip during crawl (never captured or audited).
+   * e.g. `/login`, `/settings/*`, `http://localhost:5173/legacy`
+   */
+  ignorePages?: string[]
   viewports: Viewport[]
   useMobbin: boolean
   useShadcn: boolean

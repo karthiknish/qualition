@@ -844,6 +844,80 @@ export const extractFn = function (): any {
     uniqueMarginValues: marginValues.size
   }
 
+  /* --------------------- product polish signals ------------------------- */
+  // Empty / loading / microcopy — NN/G empty-state + interaction-states model.
+  const VAGUE_EMPTY = /^(no (data|items|results|content|records)|nothing (here|yet|found)|n\/?a|empty|—|-)$/i
+  const GENERIC_CTA = /^(submit|click here|learn more|ok|okay|continue|next|save|send|go)$/i
+  const vagueEmptyCopy: string[] = []
+  const genericCtaLabels: string[] = []
+  let emptyRegionsWithoutCta = 0
+  let skeletonCount = 0
+  let skeletonWithoutMinHeight = 0
+  let ariaBusyCount = 0
+  let disabledWithoutAria = 0
+
+  for (const el of Array.from(document.querySelectorAll('button, a[href], [role=button]'))
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 200)) {
+    const label = ((el as HTMLElement).innerText || el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()
+    if (label && GENERIC_CTA.test(label)) genericCtaLabels.push(label)
+  }
+
+  for (const el of Array.from(
+    document.querySelectorAll('[class*=empty], [class*=Empty], [data-empty], [aria-label*=empty i]')
+  )
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 40)) {
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80)
+    if (t && VAGUE_EMPTY.test(t.split(/[.!]/)[0].trim())) vagueEmptyCopy.push(t.slice(0, 60))
+    const hasCta = !!el.querySelector('a[href], button, [role=button]')
+    if (!hasCta && (el.textContent || '').trim().length < 120) emptyRegionsWithoutCta++
+  }
+
+  // Sparse main-column bands that look empty (no CTA, almost no copy).
+  for (const el of layoutKids.slice(0, 20)) {
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
+    const r = el.getBoundingClientRect()
+    if (r.height < 160 || t.length > 80) continue
+    const hasCta = !!el.querySelector('a[href], button, [role=button]')
+    if (!hasCta && t.length < 40) emptyRegionsWithoutCta++
+    if (t && VAGUE_EMPTY.test(t.split(/[.!]/)[0].trim())) vagueEmptyCopy.push(t.slice(0, 60))
+  }
+
+  for (const el of Array.from(
+    document.querySelectorAll(
+      '[class*=skeleton], [class*=Skeleton], [aria-busy=true], [data-loading], .animate-pulse'
+    )
+  ).slice(0, 60)) {
+    if (isDevChrome(el)) continue
+    const busy = el.getAttribute('aria-busy') === 'true'
+    if (busy) ariaBusyCount++
+    const cls = typeof (el as HTMLElement).className === 'string' ? (el as HTMLElement).className : ''
+    if (/skeleton|animate-pulse/i.test(cls) || el.hasAttribute('data-loading')) {
+      skeletonCount++
+      const mh = parseFloat(getComputedStyle(el).minHeight) || 0
+      const h = el.getBoundingClientRect().height
+      if (mh < 8 && h < 8) skeletonWithoutMinHeight++
+    }
+  }
+
+  for (const el of Array.from(document.querySelectorAll('button, input, select, textarea, [role=button]'))
+    .filter((e) => isVisible(e) && !isDevChrome(e))
+    .slice(0, 200)) {
+    const input = el as HTMLInputElement
+    if (input.disabled && el.getAttribute('aria-disabled') !== 'true') disabledWithoutAria++
+  }
+
+  const polish = {
+    emptyRegionsWithoutCta,
+    vagueEmptyCopy: [...new Set(vagueEmptyCopy)].slice(0, 8),
+    genericCtaLabels: [...new Set(genericCtaLabels)].slice(0, 8),
+    skeletonCount,
+    skeletonWithoutMinHeight,
+    ariaBusyCount,
+    disabledWithoutAria
+  }
+
   return {
     title: document.title,
     tokens,
@@ -879,6 +953,7 @@ export const extractFn = function (): any {
         'a[href^="#"][class*=skip i], a[href="#main"], a[href="#content"], a.skip-to-content, a[href="#app"]'
       ),
       layout,
+      polish,
       // Must skip Agentation / Vercel toolbar / etc. — they stay in the DOM
       // after hideDevChrome (display:none) and would otherwise inflate this
       // count into a false "icon-only buttons" finding on every page.

@@ -293,6 +293,99 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
       )
     }
   }
+
+  /* ---- product polish: empty / loading / microcopy (NN/G + state coverage) ---- */
+  const polish = (page.signals?.polish ?? null) as
+    | {
+        emptyRegionsWithoutCta?: number
+        vagueEmptyCopy?: string[]
+        genericCtaLabels?: string[]
+        skeletonCount?: number
+        skeletonWithoutMinHeight?: number
+        ariaBusyCount?: number
+        disabledWithoutAria?: number
+      }
+    | null
+  if (polish) {
+    if ((polish.emptyRegionsWithoutCta ?? 0) >= 1) {
+      out.push(
+        mk(
+          page,
+          'content',
+          'major',
+          `${polish.emptyRegionsWithoutCta} empty region(s) without a next-step CTA`,
+          'Blank or near-blank panels with no action leave users unsure whether the product is broken or incomplete (NN/G empty-state guidance).',
+          'Add a short explanation of why it is empty plus one primary CTA that populates the space (Create…, Add…, Import…).',
+          { effort: 'component', confidence: 'high' }
+        )
+      )
+    }
+    if ((polish.vagueEmptyCopy?.length ?? 0) >= 1) {
+      out.push(
+        mk(
+          page,
+          'content',
+          'minor',
+          `Vague empty copy: ${polish.vagueEmptyCopy!.slice(0, 3).join(' · ')}`,
+          'Phrases like “No data” / “Nothing here” communicate status but not recovery. Empty states should explain context and offer a path forward.',
+          'Rewrite to name what belongs here and how to get the first item (e.g. “No projects yet — create one to start”).',
+          { effort: 'one-line', confidence: 'high' }
+        )
+      )
+    }
+    if ((polish.genericCtaLabels?.length ?? 0) >= 2) {
+      out.push(
+        mk(
+          page,
+          'content',
+          'minor',
+          `Generic CTA labels: ${[...new Set(polish.genericCtaLabels!)].slice(0, 4).join(', ')}`,
+          'Submit / Click here / Learn more do not say what happens next. Verb + object labels scan better and improve accessibility announcements.',
+          'Replace with specific actions (Save draft, Create invoice, View pricing).',
+          { effort: 'one-line', confidence: 'high' }
+        )
+      )
+    }
+    if ((polish.skeletonWithoutMinHeight ?? 0) >= 2) {
+      out.push(
+        mk(
+          page,
+          'craft',
+          'minor',
+          `${polish.skeletonWithoutMinHeight} skeleton/pulse placeholders without reserved height`,
+          'Zero-height skeletons collapse layout until content arrives (CLS). Skeleton screens should mirror the final content wireframe, not a blank frame (NN/G).',
+          'Give each skeleton a min-height (or aspect-ratio) matching the loaded card/row so the page does not jump.',
+          { effort: 'one-line', confidence: 'medium' }
+        )
+      )
+    } else if ((polish.skeletonCount ?? 0) >= 3 && (polish.ariaBusyCount ?? 0) === 0) {
+      out.push(
+        mk(
+          page,
+          'accessibility',
+          'nit',
+          'Loading skeletons present without aria-busy',
+          'Sighted users see placeholders; assistive tech may not know content is still loading.',
+          'Set aria-busy="true" on the loading region (and clear it when content resolves); optionally aria-live="polite".',
+          { effort: 'one-line', confidence: 'medium' }
+        )
+      )
+    }
+    if ((polish.disabledWithoutAria ?? 0) >= 4) {
+      out.push(
+        mk(
+          page,
+          'accessibility',
+          'nit',
+          `${polish.disabledWithoutAria} disabled controls without aria-disabled`,
+          'Native disabled is often enough for form controls, but custom role=button patterns and inconsistent styling benefit from an explicit aria-disabled for AT parity.',
+          'Mirror disabled state with aria-disabled="true" (and keep focus order intentional — do not leave dead tab stops).',
+          { effort: 'one-line', confidence: 'low' }
+        )
+      )
+    }
+  }
+
   if (t.transitions.length > 5) {
     out.push(
       mk(page, 'coherence', 'nit',

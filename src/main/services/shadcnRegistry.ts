@@ -237,6 +237,116 @@ export async function recommendForSection(
   }
 }
 
+export type RecommendReason =
+  | 'repeated-role'
+  | 'many-findings'
+  | 'low-confidence'
+  | 'empty-slab'
+  | 'generic-content'
+
+/**
+ * Only search Shoogle/shadcn for sections that look immature or are stamped
+ * out repeatedly. Mature, unique, low-finding sections stay out of the
+ * recommendation noise.
+ */
+export function shouldRecommendReplacement(
+  section: PageSection,
+  opts: {
+    problems: string[]
+    roleCountOnPage: number
+    severityBoost?: number
+  }
+): { yes: boolean; reasons: RecommendReason[] } {
+  const reasons: RecommendReason[] = []
+  const roleCount = opts.roleCountOnPage
+  const problems = opts.problems
+  const severityBoost = opts.severityBoost ?? 0
+  const textLen = (section.textPreview ?? '').trim().length
+  const emptySlab = section.rect.height >= 220 && textLen < 40 && section.ctaLabels.length === 0
+
+  // Mature & unique with no defects — do not bother Shoogle.
+  if (roleCount <= 2 && section.roleConfidence >= 0.7 && problems.length === 0 && !emptySlab) {
+    return { yes: false, reasons: [] }
+  }
+
+  // Repeated content blobs or any role with 5+ clones → high leverage to replace once.
+  if (roleCount >= 5 || (roleCount >= 4 && section.role === 'content')) {
+    reasons.push('repeated-role')
+  }
+  if (problems.length >= 2 || (problems.length >= 1 && severityBoost >= 2)) {
+    reasons.push('many-findings')
+  }
+  if (section.roleConfidence > 0 && section.roleConfidence < 0.55) {
+    reasons.push('low-confidence')
+  }
+  if (emptySlab) reasons.push('empty-slab')
+  if (
+    section.role === 'content' &&
+    (problems.length >= 1 || section.stats.interactiveCount >= 8) &&
+    section.headings.length === 0
+  ) {
+    reasons.push('generic-content')
+  }
+
+  return { yes: reasons.length > 0, reasons }
+}
+
+/** Pick at most `limit` sections across a page that deserve registry search. */
+export function pickSectionsForRecommendations(
+  pageUrl: string,
+  sections: PageSection[],
+  findings: { sectionId?: string; pageUrl: string; severity: string; title: string }[],
+  limit = 8
+): { section: PageSection; problems: string[]; reasons: RecommendReason[] }[] {
+  const roleCounts = new Map<string, number>()
+  for (const s of sections) roleCounts.set(s.role, (roleCounts.get(s.role) ?? 0) + 1)
+
+  const severityWeight = (sev: string): number =>
+    sev === 'blocker' || sev === 'critical' ? 3 : sev === 'major' ? 2 : sev === 'minor' ? 1 : 0
+
+  const scored: {
+    section: PageSection
+    problems: string[]
+    reasons: RecommendReason[]
+    score: number
+  }[] = []
+
+  // One recommendation per repeated role (worst instance), not every clone.
+  const seenRoles = new Set<string>()
+
+  for (const s of sections) {
+    const problems = findings
+      .filter((f) => f.sectionId === s.id && f.pageUrl === pageUrl)
+      .map((f) => f.title)
+    const boost = findings
+      .filter((f) => f.sectionId === s.id && f.pageUrl === pageUrl)
+      .reduce((n, f) => n + severityWeight(f.severity), 0)
+    const roleCount = roleCounts.get(s.role) ?? 1
+    const gate = shouldRecommendReplacement(s, { problems, roleCountOnPage: roleCount, severityBoost: boost })
+    if (!gate.yes) continue
+
+    if (gate.reasons.includes('repeated-role')) {
+      if (seenRoles.has(s.role)) continue
+      seenRoles.add(s.role)
+    }
+
+    const score =
+      boost * 10 +
+      problems.length * 3 +
+      (gate.reasons.includes('repeated-role') ? 20 : 0) +
+      (gate.reasons.includes('empty-slab') ? 15 : 0) +
+      (gate.reasons.includes('low-confidence') ? 8 : 0) +
+      (1 - (s.roleConfidence || 0)) * 5
+
+    scored.push({ section: s, problems, reasons: gate.reasons, score })
+  }
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(({ section, problems, reasons }) => ({ section, problems, reasons }))
+}
+
 async function recommendFromShadcn(
   section: PageSection,
   extra: { name: string; url: string }[],

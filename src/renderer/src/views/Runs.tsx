@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Run } from '../../../shared/types'
-import { api, cx, gradeColor } from '../lib/api'
+import { api, cx, formatDuration, gradeColor } from '../lib/api'
 import { Badge, Button, Empty, PageHeader, Panel } from '../components/ui'
 
 export default function Runs({
@@ -78,6 +78,14 @@ function RunRow({
         </div>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
           <span>{new Date(r.createdAt).toLocaleString()}</span>
+          {r.finishedAt && (
+            <>
+              <span className="text-zinc-700">·</span>
+              <span className="font-mono tabular-nums text-zinc-400">
+                {formatDuration(r.finishedAt - r.createdAt)}
+              </span>
+            </>
+          )}
           <span className="text-zinc-700">·</span>
           <span>
             {r.pages.length} page{r.pages.length === 1 ? '' : 's'}
