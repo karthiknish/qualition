@@ -102,6 +102,19 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --mac --publish always
 
+      - name: Attach changelog notes
+        if: steps.bump.outputs.skipped != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.bump.outputs.version }}"
+          node scripts/release-notes.mjs "$VERSION" > .release-notes.md
+          gh release edit "v${VERSION}" --notes-file .release-notes.md
+          echo "### Release notes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat .release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
       # After assets are published — never block the release on PR creation.
       - name: Open PR to sync version on main
         if: steps.bump.outputs.skipped != 'true' && steps.bump.outputs.bumped == 'true'

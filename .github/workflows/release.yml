@@ -65,6 +65,23 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npx electron-builder --mac --publish always
 
+      - name: Attach changelog notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+            VERSION="${VERSION#v}"
+          fi
+          node scripts/release-notes.mjs "$VERSION" > .release-notes.md
+          gh release edit "v${VERSION}" --notes-file .release-notes.md
+          echo "### Release notes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat .release-notes.md >> "$GITHUB_STEP_SUMMARY"
+
       - name: Summarise artifacts
         run: |
           echo "### Published artifacts" >> $GITHUB_STEP_SUMMARY
