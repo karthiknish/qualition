@@ -930,8 +930,11 @@ export const extractFn = function (): any {
   }
 
   /* ---------------- broken / soft-404 / overflow UI ---------------------- */
+  // Heading/title only — body “not found” copy false-positives on real records.
   const SOFT_404 =
-    /\b(not found|no [^\n.]{0,40} at this address|does(?:\s*not|n't) exist|page not found|could(?:\s*not|n't) find|nothing (here|to show)|no longer available|unknown (run|record|item|id|trace|task)|invalid (run|id|link|url)|was deleted|has been removed|no (run|record|task|item|trace|agent|page) (here|found|at|with)|can't find|cannot find|not on this desk|is not on this)\b/i
+    /\b((?:run|task|agent|record|item|trace|page|instruction|instructions|workflow|claim)\s+not\s+found|not\s+found|no\s+[^\n.]{0,40}\s+at\s+this\s+address|does(?:\s*not|n't)\s+exist|page\s+not\s+found|could(?:\s*not|n't)\s+find|nothing\s+(here|to\s+show)|no\s+longer\s+available|unknown\s+(run|record|item|id|trace|task)|invalid\s+(run|id|link|url)|was\s+deleted|has\s+been\s+removed|no\s+(run|record|task|item|trace|agent|page)\s+(here|found|at\s+this)|can't\s+find|cannot\s+find|not\s+on\s+this\s+desk)\b/i
+  const RECORD_CHROME =
+    /\b(waiting on you|waiting on a person|stop this run|open workflow|open task|open review|approve|keep waiting|steps|send back|park for human|claim\s+[a-z0-9-]+)\b/gi
   const mainEl =
     (document.querySelector('main, [role=main]') as HTMLElement) ||
     (document.querySelector('[data-testid*=content i], [class*=page-content i], [class*=main-content i]') as HTMLElement) ||
@@ -947,18 +950,29 @@ export const extractFn = function (): any {
   }
   const mainText = stripChromeText(mainEl)
   const h1Text = Array.from(document.querySelectorAll('h1'))
+    .filter((h) => {
+      const r = h.getBoundingClientRect()
+      const cs = getComputedStyle(h)
+      return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'
+    })
     .map((h) => (h.textContent || '').trim())
     .filter(Boolean)
     .join(' · ')
   const titleText = document.title || ''
-  const softCandidates = [h1Text, titleText, mainText.slice(0, 500)]
-  const soft404Evidence = softCandidates.find((t) => SOFT_404.test(t)) || ''
   const mainActions = mainEl.querySelectorAll('a[href], button, [role=button]').length
-  // An h1/title soft-404 is authoritative — SPA chrome around it often makes body text long.
   const headingSoft = SOFT_404.test(h1Text) || SOFT_404.test(titleText)
+  let recordSignals = 0
+  const recordBlob = `${h1Text} ${mainText.slice(0, 800)}`
+  while (RECORD_CHROME.exec(recordBlob)) recordSignals++
+  const soft404Evidence = headingSoft
+    ? ([h1Text, titleText].find((t) => SOFT_404.test(t)) || h1Text || titleText)
+    : ''
+  // Match isSoft404Shell: heading hit + not a real record chrome shell.
   const soft404 = !!(
-    soft404Evidence &&
-    (headingSoft || (mainText.length < 900 && mainActions <= 8))
+    headingSoft &&
+    recordSignals < 2 &&
+    !(mainText.length >= 650 && mainActions >= 5) &&
+    mainText.length < 1100
   )
 
   let clippedTextNodes = 0
@@ -991,14 +1005,18 @@ export const extractFn = function (): any {
   let overlappingTextPairs = 0
   const textBoxes: { el: Element; r: DOMRect }[] = []
   for (const el of Array.from(
-    mainEl.querySelectorAll('span, p, h1, h2, h3, h4, h5, h6, label, td, th, li, time, code, small')
+    mainEl.querySelectorAll(
+      'span, p, h1, h2, h3, h4, h5, h6, label, td, th, li, time, code, small, a, button, div'
+    )
   )
     .filter((e) => isVisible(e) && !isDevChrome(e))
-    .slice(0, 220)) {
+    .slice(0, 320)) {
     const t = (el.textContent || '').replace(/\s+/g, ' ').trim()
     if (t.length < 1) continue
+    // Timeline ticks / axis labels are often short divs — keep them; skip long blocks.
+    if (el.tagName === 'DIV' && t.length > 48) continue
     const r = el.getBoundingClientRect()
-    if (r.width < 4 || r.height < 4 || r.width > 900) continue
+    if (r.width < 3 || r.height < 3 || r.width > 900) continue
     const hasTextChild = Array.from(el.children).some((c) => {
       const cr = c.getBoundingClientRect()
       return (c.textContent || '').trim().length > 0 && cr.height > 2
@@ -1006,14 +1024,15 @@ export const extractFn = function (): any {
     if (hasTextChild) continue
     textBoxes.push({ el, r })
   }
-  for (let i = 0; i < Math.min(textBoxes.length, 120); i++) {
-    for (let j = i + 1; j < Math.min(textBoxes.length, 120); j++) {
+  for (let i = 0; i < Math.min(textBoxes.length, 160); i++) {
+    for (let j = i + 1; j < Math.min(textBoxes.length, 160); j++) {
       const a = textBoxes[i]
       const b = textBoxes[j]
       if (a.el.contains(b.el) || b.el.contains(a.el)) continue
       const ox = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left)
       const oy = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top)
-      if (ox > 6 && oy > 6 && ox * oy > 80) overlappingTextPairs++
+      // Timelines often collide with thin labels — lower than before (6×6×80).
+      if (ox > 3 && oy > 3 && ox * oy > 36) overlappingTextPairs++
     }
   }
 

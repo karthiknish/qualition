@@ -12,7 +12,7 @@ import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
 import { buildTokenDictionary } from './tokens.js'
 import { DEV_CHROME_EXCLUDE_LIST, hideDevChrome, installDevChromeGuard } from './devChrome.js'
 import { configurePlaywrightBrowsersPath } from './browsers.js'
-import { looksLikeSoft404 } from './brokenUi.js'
+import { looksLikeSoft404, isSoft404Shell } from './brokenUi.js'
 import { isDetailPath } from './componentGaps.js'
 import { normalizeTargetUrl, schemeFallback, isIgnoredPage } from '../../shared/url.js'
 import type {
@@ -1042,45 +1042,76 @@ async function waitForCaptureReady(page: Page, timeoutMs = 10_000): Promise<void
 /**
  * Soft-404 shells (HTTP 200 + “not found” / “no run at this address”) look
  * “ready” to waitForPageReady because they have real copy. Fail the step when
- * a detail/id URL lands on one — otherwise flows go green on dead records.
+ * a detail/id URL lands on a confirmed missing-record shell — not a flash or
+ * a real record that happens to mention “not found” in body copy.
  */
 async function assertNotSoft404(page: Page): Promise<void> {
-  const info = await page
-    .evaluate(() => {
-      const root =
-        (document.querySelector('main, [role=main]') as HTMLElement) ||
-        (document.querySelector('[data-testid*=content i], [class*=page-content i], [class*=main-content i]') as HTMLElement) ||
-        document.body
-      const clone = root.cloneNode(true) as HTMLElement
-      for (const n of Array.from(
-        clone.querySelectorAll('nav, aside, [role=navigation], [role=complementary], header, footer, [data-sidebar]')
-      )) {
-        n.remove()
-      }
-      const mainText = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim()
-      const h1 = Array.from(document.querySelectorAll('h1'))
-        .map((h) => (h.textContent || '').trim())
-        .filter(Boolean)
-        .join(' · ')
-      const actions = root.querySelectorAll('a[href], button, [role=button]').length
-      return {
-        path: location.pathname,
-        title: document.title || '',
-        h1,
-        sample: mainText.slice(0, 500),
-        chars: mainText.length,
-        actions
-      }
-    })
-    .catch(() => null)
-  if (!info) return
-  if (!isDetailPath(info.path)) return
-  const headingSoft = looksLikeSoft404(info.h1) || looksLikeSoft404(info.title)
-  const blob = `${info.h1}\n${info.title}\n${info.sample}`
-  if (!looksLikeSoft404(blob)) return
-  // Heading soft-404 wins; otherwise require a short content shell.
-  if (!headingSoft && (info.chars >= 900 || info.actions > 8)) return
-  const evidence = [info.h1, info.title, info.sample].find((t) => looksLikeSoft404(t)) || info.sample.slice(0, 80)
+  const read = async (): Promise<{
+    path: string
+    title: string
+    h1: string
+    sample: string
+    chars: number
+    actions: number
+    recordSignals: number
+  } | null> =>
+    page
+      .evaluate(() => {
+        const root =
+          (document.querySelector('main, [role=main]') as HTMLElement) ||
+          (document.querySelector(
+            '[data-testid*=content i], [class*=page-content i], [class*=main-content i]'
+          ) as HTMLElement) ||
+          document.body
+        const clone = root.cloneNode(true) as HTMLElement
+        for (const n of Array.from(
+          clone.querySelectorAll(
+            'nav, aside, [role=navigation], [role=complementary], header, footer, [data-sidebar]'
+          )
+        )) {
+          n.remove()
+        }
+        const mainText = (clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim()
+        // Visible main headings only — ignore hidden route-fallback nodes.
+        const h1 = Array.from(document.querySelectorAll('h1'))
+          .filter((h) => {
+            const r = h.getBoundingClientRect()
+            const cs = getComputedStyle(h)
+            return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none'
+          })
+          .map((h) => (h.textContent || '').trim())
+          .filter(Boolean)
+          .join(' · ')
+        const actions = root.querySelectorAll('a[href], button, [role=button]').length
+        const RECORD =
+          /\b(waiting on you|waiting on a person|stop this run|open workflow|open task|open review|approve|keep waiting|steps|send back|park for human|claim\s+[a-z0-9-]+)\b/gi
+        let recordSignals = 0
+        const blob = `${h1} ${mainText.slice(0, 800)}`
+        while (RECORD.exec(blob)) recordSignals++
+        return {
+          path: location.pathname,
+          title: document.title || '',
+          h1,
+          sample: mainText.slice(0, 500),
+          chars: mainText.length,
+          actions,
+          recordSignals
+        }
+      })
+      .catch(() => null)
+
+  let last: Awaited<ReturnType<typeof read>> = null
+  for (let attempt = 0; attempt < 3; attempt++) {
+    last = await read()
+    if (!last) return
+    if (!isDetailPath(last.path)) return
+    if (!isSoft404Shell(last)) return
+    // Loading flash: real records often paint a not-found shell for a tick.
+    await page.waitForTimeout(450)
+  }
+  if (!last || !isSoft404Shell(last)) return
+  const evidence =
+    [last.h1, last.title].find((t) => looksLikeSoft404(t)) || last.sample.slice(0, 80)
   throw new Error(`detail route soft-404: ${evidence.slice(0, 120)}`)
 }
 

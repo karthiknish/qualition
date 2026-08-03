@@ -9,6 +9,7 @@
  */
 import type {
   CapturedPage,
+  Category,
   Finding,
   InteractionReport,
   MobbinReference,
@@ -25,6 +26,7 @@ import {
 const PERSONA = `You are Qualition's principal design critic. You have shipped and killed a lot of interfaces.
 You are blunt, specific and evidence-driven. You never praise generically, never hedge, and never invent details you cannot see in the evidence.
 You care, in order: (1) does the interface communicate hierarchy in one glance, (2) is the visual system coherent — one type scale, one spacing rhythm, one radius language, one colour semantic, (3) is there enough *variety* that the page has rhythm rather than being an endless stack of identical slabs, (4) does the flow remove friction — including the states most teams forget: hover, focus, disabled, loading, empty, error, (5) craft details: alignment, optical spacing, contrast, focus states.
+Finding categories MUST be one of: coherence, variety, accessibility, responsive, flow, performance, content, craft. Never invent categories like hierarchy/typography/spacing/density — fold those into craft or coherence.
 When reference imagery from Mobbin is supplied, compare against it concretely: what the reference does structurally that this does not.
 AI-SLOP BAN (impeccable.style): flag purple/violet gradients, cyan-on-dark neon, cream/beige default surfaces, Inter/Geist/Roboto as the whole personality, gradient text, side colour accents on cards/sections/list items (no coloured left/right edge stripes), nested cards, icon-tile-above-heading feature grids, hero eyebrow pills, bounce/elastic easing, colored glow shadows, decorative pulsing dots. Prefer distinctive type and intentional palette over fake depth.
 FOCUS CRAFT: when calling for a focus indicator, require :focus-visible only — soft offset ring/outline via tokens. Ban thick border-on-:focus or border-on-:active “rings” that leave a harsh pressed look for mouse users.
@@ -92,11 +94,53 @@ function clampSeverity(s: unknown): Severity {
   return value === 'blocker' ? 'critical' : value
 }
 
+const VALID_CATEGORIES = new Set<Category>([
+  'coherence',
+  'variety',
+  'accessibility',
+  'responsive',
+  'flow',
+  'performance',
+  'content',
+  'craft'
+])
+
+/** Map premium-dimension / freeform labels the model invents onto scored categories. */
+const CATEGORY_ALIASES: Record<string, Category> = {
+  hierarchy: 'craft',
+  typography: 'craft',
+  spacing: 'craft',
+  density: 'craft',
+  elevation: 'craft',
+  consistency: 'coherence',
+  distinctiveness: 'variety',
+  comparison: 'craft',
+  visual: 'craft',
+  layout: 'craft',
+  ux: 'flow',
+  ui: 'craft',
+  a11y: 'accessibility',
+  a11yity: 'accessibility',
+  copy: 'content',
+  writing: 'content',
+  motion: 'craft',
+  animation: 'craft',
+  color: 'coherence',
+  colour: 'coherence',
+  theme: 'coherence'
+}
+
+export function clampCategory(c: unknown): Category {
+  const raw = String(c ?? 'craft').toLowerCase().trim()
+  if (VALID_CATEGORIES.has(raw as Category)) return raw as Category
+  return CATEGORY_ALIASES[raw] ?? 'craft'
+}
+
 function toFindings(raw: any, pageUrl: string): Finding[] {
   const list: any[] = raw?.findings ?? []
   return list.slice(0, 40).map((f) => ({
     id: `g${++counter}`,
-    category: f.category ?? 'craft',
+    category: clampCategory(f.category),
     severity: clampSeverity(f.severity),
     title: String(f.title ?? '').slice(0, 160),
     detail: String(f.detail ?? '').slice(0, 1200),

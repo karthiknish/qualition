@@ -16,7 +16,8 @@ import { deleteCredential, listCredentials, originOf, resolveCredential, saveCre
 import { loadRun, redactRun, saveRun } from '../src/main/services/store.js'
 import { detailRecordFlows, flowInventory, heuristicFlows, validateFlow, isChromeAssert, isSiteChromeLabel, isPlaceholderAssert, isSoft404Assert } from '../src/main/services/flows.js'
 import { auditImpeccableSlop } from '../src/main/services/impeccableSlop.js'
-import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath } from '../src/main/services/brokenUi.js'
+import { auditBrokenUi, brokenUiCritiqueBoost, looksLikeSoft404, critiquePriorityScore, isKitSpecimenPath, isSoft404Shell } from '../src/main/services/brokenUi.js'
+import { clampCategory } from '../src/main/services/critic.js'
 import {
   auditPremiumCraft,
   premiumCraftScore,
@@ -1341,6 +1342,80 @@ test('soft-404 copy is detected on detail routes', () => {
   assert.equal(isDetailPath('/traces/xh7c1abc0123456789'), true)
 })
 
+test('isSoft404Shell rejects real record pages that mention not-found in body', () => {
+  assert.equal(
+    isSoft404Shell({
+      h1: 'Task not found',
+      title: 'Task not found',
+      sample: 'Task not found',
+      chars: 40,
+      actions: 1,
+      recordSignals: 0
+    }),
+    true
+  )
+  // Real CLM-style record: heading is the claim id, body may mention related misses.
+  assert.equal(
+    isSoft404Shell({
+      h1: 'CLM-1042',
+      title: 'CLM-1042 · Tasks',
+      sample: 'Waiting on you · Open workflow · Approve · Steps · related task not found toast',
+      chars: 900,
+      actions: 8,
+      recordSignals: 4
+    }),
+    false
+  )
+  // Body-only "not found" without heading hit must never trip.
+  assert.equal(
+    isSoft404Shell({
+      h1: 'Spend overview',
+      title: 'Spend',
+      sample: 'Could not find matching invoices in this filter',
+      chars: 200,
+      actions: 6,
+      recordSignals: 0
+    }),
+    false
+  )
+})
+
+test('auditBrokenUi does not flag real records from body soft-404 copy', () => {
+  const p = page({
+    url: 'https://app.test/tasks/CLM-1042',
+    title: 'CLM-1042 · Tasks',
+    sections: [
+      {
+        id: 's1',
+        role: 'content',
+        roleConfidence: 1,
+        label: 'main',
+        selector: 'main',
+        rect: { x: 0, y: 0, width: 800, height: 600 },
+        headings: ['CLM-1042'],
+        textPreview: 'Waiting on you. Open workflow. Approve. Steps. Send back.',
+        ctaLabels: [],
+        components: [],
+        stats: { interactiveCount: 8, imageCount: 0, textDensity: 1, distinctBgColors: 1, distinctFontSizes: 2, maxTextWidthPx: 400 }
+      }
+    ],
+    controls: Array.from({ length: 8 }, (_, i) => ({
+      tag: 'button',
+      type: 'button',
+      role: 'button',
+      text: `Action ${i}`,
+      placeholder: '',
+      label: '',
+      ariaLabel: '',
+      name: '',
+      href: '',
+      testId: ''
+    }))
+  })
+  const findings = auditBrokenUi(p)
+  assert.equal(findings.some((f) => /not-found|missing-record/i.test(f.title)), false)
+})
+
 test('auditBrokenUi flags soft-404 detail shells as critical', () => {
   const p = page({
     url: 'https://app.test/traces/xh7c1abc0123456789',
@@ -1361,6 +1436,39 @@ test('auditBrokenUi flags soft-404 detail shells as critical', () => {
   assert.equal(hit!.severity, 'critical')
   assert.equal(hit!.category, 'flow')
   assert.ok(brokenUiCritiqueBoost(p) >= 500)
+})
+
+test('critiquePriorityScore boosts quiet product list pages', () => {
+  const quiet = page({
+    url: 'https://app.test/spend',
+    title: 'Spend',
+    controls: Array.from({ length: 6 }, (_, i) => ({
+      tag: 'button',
+      type: 'button',
+      role: 'button',
+      text: `Filter ${i}`,
+      placeholder: '',
+      label: '',
+      ariaLabel: '',
+      name: '',
+      href: '',
+      testId: ''
+    }))
+  })
+  const kit = page({ url: 'https://app.test/primitives', title: 'Primitives' })
+  assert.ok(critiquePriorityScore(quiet, 0) > critiquePriorityScore(kit, 2))
+})
+
+test('clampCategory maps invented AI labels onto scored categories', () => {
+  assert.equal(clampCategory('hierarchy'), 'craft')
+  assert.equal(clampCategory('typography'), 'craft')
+  assert.equal(clampCategory('spacing'), 'craft')
+  assert.equal(clampCategory('density'), 'craft')
+  assert.equal(clampCategory('consistency'), 'coherence')
+  assert.equal(clampCategory('distinctiveness'), 'variety')
+  assert.equal(clampCategory('comparison'), 'craft')
+  assert.equal(clampCategory('flow'), 'flow')
+  assert.equal(clampCategory('nonsense'), 'craft')
 })
 
 test('auditBrokenUi flags clipped and overlapping text', () => {

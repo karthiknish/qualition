@@ -7,7 +7,7 @@
  * the calls-to-action it saw in each section.
  */
 import type { CapturedPage, FlowStep, PageControl } from '../../shared/types.js'
-import { looksLikeSoft404 } from './brokenUi.js'
+import { looksLikeSoft404, isSoft404Shell, countRecordSignals } from './brokenUi.js'
 
 const UNSAFE =
   /\b(delete|remove|destroy|cancel|unsubscribe|pay|purchase|buy|checkout|order|log ?out|sign ?out|deactivate|close account|upgrade now|billing)\b/i
@@ -82,8 +82,16 @@ export function isPlaceholderAssert(needle: string, pages: CapturedPage[]): bool
 function pageLooksSoft404(page: CapturedPage): boolean {
   const broken = (page.signals as { brokenUi?: { soft404?: boolean } } | undefined)?.brokenUi
   if (broken?.soft404) return true
-  const blob = [page.title, ...page.sections.flatMap((s) => [...s.headings, s.textPreview])].join(' ')
-  return looksLikeSoft404(blob)
+  const h1 = page.sections.flatMap((s) => s.headings).join(' · ')
+  const sample = page.sections.map((s) => s.textPreview).join(' ').slice(0, 500)
+  return isSoft404Shell({
+    h1,
+    title: page.title || '',
+    sample,
+    chars: sample.length,
+    actions: page.controls?.length ?? 0,
+    recordSignals: countRecordSignals(`${h1} ${sample}`)
+  })
 }
 
 /** Words that make a decent assertText target: visible, stable, specific. */
