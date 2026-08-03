@@ -470,6 +470,8 @@ export interface RunConfig {
   useGemini: boolean
   /** Deep interaction probing (hover/focus/click/keyboard/forms). */
   useInteractionProbe: boolean
+  /** Lighthouse perf / a11y / best-practices / SEO pass (own Chrome). */
+  useLighthouse: boolean
   provider: ProviderId
   geminiModel: string
   /** Injected by main from Settings; never persisted inside a run. */

@@ -29,6 +29,7 @@ export default function NewRun({
   const [useMobbin, setUseMobbin] = useState(true)
   const [useShadcn, setUseShadcn] = useState(true)
   const [useGemini, setUseGemini] = useState(true)
+  const [useLighthouse, setUseLighthouse] = useState(true)
   const [probe, setProbe] = useState(true)
   const [flowText, setFlowText] = useState('')
   const [busy, setBusy] = useState(false)
@@ -97,6 +98,7 @@ export default function NewRun({
         useMobbin,
         useShadcn,
         useGemini,
+        useLighthouse,
         useInteractionProbe: probe,
         provider: settings?.provider ?? 'gemini',
         geminiModel:
@@ -239,6 +241,12 @@ export default function NewRun({
           onChange={setUseGemini}
           label="AI critique"
           hint={status?.model.ok ? `${status.model.id} · ${status.model.model} ready` : `${status?.model.id ?? 'model'} not configured — set it in Settings`}
+        />
+        <Toggle
+          checked={useLighthouse}
+          onChange={setUseLighthouse}
+          label="Lighthouse"
+          hint="Perf, accessibility, best-practices and SEO via a separate Chrome pass — slowest independent tool"
         />
       </div>
 

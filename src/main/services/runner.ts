@@ -276,22 +276,30 @@ export async function executeRun(
       const primary = run.pages[0]?.url ?? cfg.targetUrl
       const skipSeo = run.archetype?.archetype === 'app'
       const knownAxeIds = new Set(run.pages.flatMap((p) => p.axe.map((v) => v.id)))
-      progress('lighthouse', 38, 'Running Lighthouse + pa11y in parallel')
+      // Default on when field missing (older run configs / tests).
+      const lighthouseOn = cfg.useLighthouse !== false
+      progress(
+        lighthouseOn ? 'lighthouse' : 'pa11y',
+        38,
+        lighthouseOn ? 'Running Lighthouse + pa11y in parallel' : 'Running pa11y (Lighthouse off)'
+      )
 
       const previousPromise = listRuns().then((runs) =>
         runs.find((r) => r.id !== run.id && r.status === 'done' && r.config.targetUrl === cfg.targetUrl)
       )
 
       const [lhSettled, pa11ySettled, visualSettled] = await Promise.all([
-        raceCancel(
-          runLighthouse(primary, {
-            storageStatePath: storageState,
-            skipSeo,
-            onLog: (m) => log('info', m)
-          })
-        )
-          .then((v) => ({ ok: true as const, v }))
-          .catch((e) => ({ ok: false as const, e })),
+        lighthouseOn
+          ? raceCancel(
+              runLighthouse(primary, {
+                storageStatePath: storageState,
+                skipSeo,
+                onLog: (m) => log('info', m)
+              })
+            )
+              .then((v) => ({ ok: true as const, v, skipped: false as const }))
+              .catch((e) => ({ ok: false as const, e, skipped: false as const }))
+          : Promise.resolve({ ok: true as const, v: null, skipped: true as const }),
         raceCancel(
           runPa11y(primary, {
             storageStatePath: storageState,
@@ -310,7 +318,9 @@ export async function executeRun(
           .catch((e) => ({ ok: false as const, e }))
       ])
 
-      if (lhSettled.ok) {
+      if (lhSettled.skipped) {
+        log('info', 'Lighthouse skipped (turned off for this run)')
+      } else if (lhSettled.ok) {
         const lh = lhSettled.v
         if (lh) {
           run.lighthouse = lh.scores

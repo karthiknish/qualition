@@ -42,6 +42,7 @@ const config: RunConfig = {
   useShadcn: false,
   useGemini: false,
   useInteractionProbe: false,
+  useLighthouse: false,
   provider: 'gemini',
   geminiModel: 'gemini-3.6-flash',
   brutality: 'ruthless',
