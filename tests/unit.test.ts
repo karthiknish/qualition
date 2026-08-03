@@ -22,7 +22,7 @@ import {
   premiumCraftScore,
   summarizePremiumCraft
 } from '../src/main/services/premiumCraft.js'
-import { isDetailPath } from '../src/main/services/componentGaps.js'
+import { plainTextFromMarkdown } from '../src/shared/plainText.js'
 import { isDeeperRoute, sanitizeSelector } from '../src/main/services/crawler.js'
 import { queryForRole } from '../src/main/services/mobbin.js'
 import { addCommand, searchRegistry } from '../src/main/services/shadcnRegistry.js'
@@ -1506,6 +1506,21 @@ test('critique priority downranks kit pages and boosts soft-404', () => {
   })
   assert.equal(isKitSpecimenPath(kit.url), true)
   assert.ok(critiquePriorityScore(soft, 0) > critiquePriorityScore(kit, 40))
+})
+
+test('plainTextFromMarkdown strips headings lists and links for update popup', () => {
+  const md = `## Qualition 0.1.31
+
+### Features
+- **Bold** fix for soft-404
+- See [docs](https://example.com)
+
+\`code\` and <b>html</b>`
+  const plain = plainTextFromMarkdown(md)
+  assert.doesNotMatch(plain, /##|###|\*\*|\[docs\]|<b>/)
+  assert.match(plain, /Qualition 0.1.31/)
+  assert.match(plain, /Bold fix/)
+  assert.match(plain, /docs/)
 })
 
 test('premium craft flags tiny body, flat hierarchy, elevation soup, harsh borders', () => {

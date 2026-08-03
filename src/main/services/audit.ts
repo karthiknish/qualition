@@ -333,7 +333,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
           `${polish.skeletonCount} skeleton placeholders still visible after capture`,
           'Dense skeleton rows after network idle usually means the list never resolved (or capture raced a hang).',
           'Resolve the fetch, add a timeout empty/error state, and keep skeletons only for the brief in-flight window.',
-          { effort: 'component', confidence: 'medium' }
+          { effort: 'component', confidence: 'low' }
         )
       )
     }

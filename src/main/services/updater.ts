@@ -14,6 +14,7 @@ import { app, shell, type BrowserWindow } from 'electron'
 import electronUpdater from 'electron-updater'
 import { canInstallInPlace, downloadAndInstall, fetchLatestRelease, type ReleaseInfo } from './selfUpdate.js'
 import type { UpdateStatus } from '../../shared/types.js'
+import { plainTextFromMarkdown } from '../../shared/plainText.js'
 
 const { autoUpdater } = electronUpdater
 
@@ -62,7 +63,7 @@ export function initUpdater(window: BrowserWindow): void {
     emit({
       state: useSquirrel && canSelfInstall() ? 'downloading' : 'available',
       version: info.version,
-      releaseNotes: typeof info.releaseNotes === 'string' ? info.releaseNotes.slice(0, 4000) : undefined,
+      releaseNotes: typeof info.releaseNotes === 'string' ? plainTextFromMarkdown(info.releaseNotes).slice(0, 4000) : undefined,
       releaseDate: info.releaseDate
     })
   )
@@ -109,7 +110,11 @@ export async function checkForUpdates(userInitiated = true): Promise<UpdateStatu
       const release = await fetchLatestRelease()
       if (release && isNewer(release.version, app.getVersion())) {
         pendingRelease = release
-        emit({ state: 'available', version: release.version, releaseNotes: release.notes?.slice(0, 4000) })
+        emit({
+          state: 'available',
+          version: release.version,
+          releaseNotes: release.notes ? plainTextFromMarkdown(release.notes).slice(0, 4000) : undefined
+        })
       } else {
         pendingRelease = null
         emit({ state: 'idle', version: undefined })

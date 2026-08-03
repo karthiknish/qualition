@@ -435,7 +435,7 @@ export function findingsFromAiPremiumScores(
         `Premium ${label} scores ${score}/4`,
         `AI craft rubric rated ${label} below the Linear/Stripe bar. Confirm against the screenshot before rewriting.`,
         `Raise ${label}: clearer primary focal, tighter system tokens, and less competing chrome.`,
-        { source: 'ai', confidence: 'medium' }
+        { source: 'ai', confidence: 'low' }
       )
     )
   }

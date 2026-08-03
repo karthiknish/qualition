@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ArrowUpCircle, Download, Loader2, XCircle } from 'lucide-react'
 import type { UpdateStatus } from '../../../shared/types'
+import { plainTextFromMarkdown } from '../../../shared/plainText'
 import { api, cx } from '../lib/api'
 
 /**
@@ -72,7 +73,7 @@ export default function UpdateBanner(): JSX.Element | null {
 
           {status.releaseNotes && !busyState && (
             <p className="mt-1.5 line-clamp-3 text-[11px] leading-snug text-zinc-400">
-              {status.releaseNotes.replace(/<[^>]+>/g, '').slice(0, 180)}
+              {plainTextFromMarkdown(status.releaseNotes).slice(0, 220)}
             </p>
           )}
 

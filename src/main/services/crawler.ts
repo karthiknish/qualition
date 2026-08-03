@@ -1022,7 +1022,7 @@ async function waitForCaptureReady(page: Page, timeoutMs = 10_000): Promise<void
   while (Date.now() < deadline) {
     const state = await page
       .evaluate(() => {
-        const main = document.querySelector('main, [role=main]') || document.body
+        const main = (document.querySelector('main, [role=main]') || document.body) as HTMLElement
         const text = (main.innerText || main.textContent || '').replace(/\s+/g, ' ').trim()
         const skeletons = main.querySelectorAll(
           '[class*=skeleton i], [class*=Skeleton], .animate-pulse, [aria-busy=true], [data-loading]'
