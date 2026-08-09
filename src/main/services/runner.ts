@@ -316,6 +316,10 @@ export async function executeRun(
       baselineHtmlHashes: incrementalHashes,
       incrementalReuseBaseline: incrementalReuse,
       axe: cfg.axe,
+      recordHar: !!(cfg as any).recordHar,
+      recordVideo: !!(cfg as any).recordVideo,
+      connectivity: (cfg as any).connectivity,
+      throttling: (cfg as any).throttling,
       onPage: (p) => {
         run.pages.push(p)
         progress(

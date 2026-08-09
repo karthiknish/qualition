@@ -153,6 +153,14 @@ export interface CaptureOptions {
   /** When true, reuse baseline page object if html hash matches (saves Playwright). */
   incrementalReuseBaseline?: Map<string, CapturedPage>
   axe?: { tags?: string[]; disabledRules?: string[]; runOnly?: string[] }
+  /** HAR recording (Sitespeed) */
+  recordHar?: boolean
+  /** Video recording */
+  recordVideo?: boolean
+  /** Connectivity throttling */
+  connectivity?: 'cable' | '3g' | '4g' | '3gfast' | 'native'
+  /** Throttling overrides (rtt/throughput/cpu) */
+  throttling?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number }
 }
 
 export async function capturePage(
@@ -186,20 +194,52 @@ export async function capturePage(
   const toolFailures: { tool: string; message: string }[] = []
   let hiddenChromeTotal = 0
 
+  const connPresets: Record<string, { rttMs:number; throughputKbps:number; cpuSlowdown:number }> = {
+    cable: { rttMs: 28, throughputKbps: 5000, cpuSlowdown: 1 },
+    '3g': { rttMs: 300, throughputKbps: 1600, cpuSlowdown: 4 },
+    '3gfast': { rttMs: 150, throughputKbps: 1600, cpuSlowdown: 2 },
+    '4g': { rttMs: 40, throughputKbps: 9000, cpuSlowdown: 2 },
+  }
   for (const vp of opts.viewports) {
+    const harPath = opts.recordHar ? join(opts.outDir, `${slug}-${vp.name}.har`) : undefined
+    const videoDir = opts.recordVideo ? join(opts.outDir, 'video') : undefined
     const ctx = await browser.newContext({
       viewport: { width: vp.width, height: vp.height },
       isMobile: vp.isMobile,
       hasTouch: vp.isMobile,
       deviceScaleFactor: 1,
-      // axe + extraction are injected scripts; strict CSP sites would block them
       bypassCSP: true,
+      ...(harPath ? { recordHar: { path: harPath, mode: 'minimal' as const } } : {}),
+      ...(videoDir ? { recordVideo: { dir: videoDir } } : {}),
       ...(opts.storageState ? { storageState: opts.storageState } : {}),
       userAgent: vp.isMobile
         ? 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
         : undefined
     })
     const page = await ctx.newPage()
+    // Connectivity throttling (Sitespeed --connectivity)
+    if (opts.connectivity && opts.connectivity !== 'native') {
+      const preset = connPresets[opts.connectivity]
+      const rtt = opts.throttling?.rttMs ?? preset?.rttMs
+      const thr = opts.throttling?.throughputKbps ?? preset?.throughputKbps
+      const cpu = opts.throttling?.cpuSlowdownMultiplier ?? preset?.cpuSlowdown
+      try {
+        const cdp = await ctx.newCDPSession(page)
+        if (rtt != null) {
+          const download = thr && thr>0 ? thr*1024/8 : -1
+          await cdp.send('Network.emulateNetworkConditions', { offline:false, latency: rtt, downloadThroughput: download, uploadThroughput: download })
+        }
+        if (cpu) await cdp.send('Emulation.setCPUThrottlingRate', { rate: cpu })
+        await cdp.detach().catch(()=>{})
+      } catch {}
+    } else if (opts.throttling?.rttMs || opts.throttling?.throughputKbps) {
+      try {
+        const cdp = await ctx.newCDPSession(page)
+        const download = opts.throttling.throughputKbps ? opts.throttling.throughputKbps*1024/8 : -1
+        await cdp.send('Network.emulateNetworkConditions', { offline:false, latency: opts.throttling.rttMs ?? 40, downloadThroughput: download, uploadThroughput: download })
+        await cdp.detach().catch(()=>{})
+      } catch {}
+    }
     await page.addInitScript(observerInit)
     // Install before navigation so __qualitionIsDevChrome exists on first paint.
     await installDevChromeGuard(page).catch(() => {})
@@ -747,6 +787,13 @@ export async function crawl(
           queue.push(u)
           seen.add(id)
         }
+      }
+      // Sample if sitemap dwarfs budget (Unlighthouse parity)
+      const sampleCap = (opts as any).sampleSize as number | undefined
+      if (sampleCap && sitemapUrls.length > sampleCap) {
+        for (let i=sitemapUrls.length-1;i>0;i--) { const j=Math.floor(Math.random()*(i+1)); [sitemapUrls[i],sitemapUrls[j]]=[sitemapUrls[j],sitemapUrls[i]]}
+        sitemapUrls.length = sampleCap
+        opts.onLog?.(`sitemap sampled to ${sampleCap}`)
       }
       // Rank sitemap URLs in front (sampling keeps breadth diverse) but keep BFS fairness
       // by sorting the tail after sitemap injection.

@@ -554,6 +554,14 @@ export interface RunConfig {
   onlyCategories?: string[]
   /** PWA audits */
   includePwa?: boolean
+  /** HAR artifact (Sitespeed browsertime) */
+  recordHar?: boolean
+  /** Video artifact */
+  recordVideo?: boolean
+  /** Connectivity profile (Sitespeed --connectivity) */
+  connectivity?: 'cable' | '3g' | '4g' | '3gfast' | 'native'
+  /** Queue sampling for large sitemaps (Unlighthouse) */
+  sampleSize?: number
   /** When true, skip sitemap discovery and use BFS only. */
   disableSitemap?: boolean
 }
