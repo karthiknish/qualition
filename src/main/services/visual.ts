@@ -122,7 +122,7 @@ export async function compareWithBaseline(
   assetsDir: string,
   threshold = 0.02,
   ignoreSelectors: string[] = [],
-  opts: { thresholdPx?: number; antialiasing?: boolean } = {}
+  opts: { thresholdPx?: number; antialiasing?: boolean; perViewport?: Record<string, number> } = {}
 ): Promise<{ diffs: VisualDiff[]; findings: Finding[] }> {
   const diffs: VisualDiff[] = []
   const findings: Finding[] = []
@@ -147,6 +147,7 @@ export async function compareWithBaseline(
     for (const [vp, current] of Object.entries(page.screenshots)) {
       const baseShot = before.screenshots[vp]
       if (!baseShot) continue
+      const perVp = opts.perViewport?.[vp] ?? threshold
       const diffPath = join(assetsDir, `diff-${vp}-${n++}.png`)
       const res = await diffScreenshots(baseShot, current, diffPath, { threshold: opts.thresholdPx, antialiasing: opts.antialiasing })
       if (!res) continue
@@ -162,7 +163,7 @@ export async function compareWithBaseline(
       }
       diffs.push(diff)
 
-      if (res.changedRatio > threshold) {
+      if (res.changedRatio > perVp) {
         const pct = (res.changedRatio * 100).toFixed(1)
         findings.push({
           id: `vr-${n}`,

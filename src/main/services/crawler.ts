@@ -441,7 +441,9 @@ export async function capturePage(
 
         try {
           await hideDevChrome(page)
-          const axeTags = opts.axe?.tags ?? ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice']
+          const baseTags = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice']
+          const aaa = (opts.axe as any)?.level === 'AAA' ? ['wcag2aaa'] : []
+          const axeTags = opts.axe?.tags ?? [...baseTags, ...aaa]
           const disabledRules: Set<string> = new Set(opts.axe?.disabledRules ?? [])
           let axeResult: {
             violations: { id: string; impact: string | null; help: string; helpUrl: string; tags?: string[]; nodes: { target: string[]; failureSummary: string }[] }[]

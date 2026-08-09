@@ -34,6 +34,10 @@ Options:
   --maxPages <n>        Pages to crawl (default 5, 0 = unlimited with 45m cap)
   --iterations <n>      Lighthouse / metric runs to median (1-5, default 1)
   --formFactor <mode>   desktop | mobile (default desktop)
+  --connectivity <p>    cable | 4g | 3g | 3gfast (default cable)
+  --har                 Save HAR per viewport
+  --video               Record video per viewport
+  --axe-level <l>       AA | AAA (default AA)
   --out <dir>           Output dir for run.json + report.html + results.sarif (default ./qualition-report)
   --format <list>       Comma list: json,html,sarif,markdown (default json,html,sarif)
   --diff <mode>         full | changed-only (requires prior run in same project dir; default full)
@@ -57,6 +61,10 @@ async function main(): Promise<void> {
   const maxPages = args.maxPages ? Number(args.maxPages) : 5
   const iterations = Math.max(1, Math.min(5, Number(args.iterations ?? 1) || 1))
   const formFactor = (args.formFactor as string) === 'mobile' ? 'mobile' as const : 'desktop' as const
+  const connectivity = (args.connectivity as string) as 'cable'|'4g'|'3g'|'3gfast'|undefined
+  const recordHar = !!args.har
+  const recordVideo = !!args.video
+  const axeLevel = (args['axe-level'] as string) === 'AAA' ? 'AAA' as const : 'AA' as const
   const diffMode = (args.diff as string) === 'changed-only' ? 'changed-only' as const : 'full' as const
   const format = ((args.format as string) || 'json,html,sarif').split(',').map((s) => s.trim().toLowerCase())
   const budgetPath = (args.budget as string) || null
@@ -75,6 +83,10 @@ async function main(): Promise<void> {
     viewports: DEFAULT_VIEWPORTS,
     outDir,
     budgetMs: !maxPages || maxPages <= 0 ? 45 * 60_000 : undefined,
+    connectivity,
+    recordHar,
+    recordVideo,
+    axe: { level: axeLevel },
     onLog: (m) => console.log(`  ${m}`)
   })
   await browser.close().catch(() => {})
@@ -87,7 +99,7 @@ async function main(): Promise<void> {
     if (lh?.scores) console.log(`lighthouse perf ${Math.round((lh.scores.performance??0)*100)} a11y ${Math.round((lh.scores.accessibility??0)*100)}`)
   } catch (e) { console.log(`lighthouse skipped: ${(e as Error).message.slice(0,120)}`) }
 
-  const cfg = { targetUrl: site, brutality: 'ruthless' as const, viewports: DEFAULT_VIEWPORTS, formFactor, numberOfRuns: iterations } as never
+  const cfg = { targetUrl: site, brutality: 'ruthless' as const, viewports: DEFAULT_VIEWPORTS, formFactor, numberOfRuns: iterations, connectivity, recordHar, recordVideo, axe: { level: axeLevel } } as never
   const findings: unknown[] = []
   for (const p of pages) {
     const { auditPage: ap } = await import('./main/services/audit.js')

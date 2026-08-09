@@ -482,8 +482,10 @@ export async function executeRun(
         previousPromise
           .then(async (previous) => {
             if (!previous) return { ok: true as const, previous: null, diffs: null }
-            const antialias = rcForVisual?.antialias ?? true
-            const result = await compareWithBaseline(run.pages, previous, assets, visualThreshold ?? 0.02, visualIgnoreSelectors, { thresholdPx: 0.12, antialiasing: antialias })
+            const antialias = rcForVisual?.antialias ?? rcForVisual?.visual?.perViewport ? true : true
+            const perViewport = (rcForVisual as any)?.visual?.perViewport as Record<string,number>|undefined
+            const thresholdPx = Number((rcForVisual as any)?.visual?.thresholdPx) || 0.12
+            const result = await compareWithBaseline(run.pages, previous, assets, visualThreshold ?? 0.02, visualIgnoreSelectors, { thresholdPx, antialiasing: antialias, perViewport })
             return { ok: true as const, previous, diffs: result }
           })
           .catch((e) => ({ ok: false as const, e }))

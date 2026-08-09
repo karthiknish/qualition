@@ -12,7 +12,7 @@ export interface QualitionRc {
   /** Override thresholds (e.g. { "purpleUsage": 24, "sideTabBorders": 5 }). */
   thresholds?: Record<string, number>
   /** Visual regression: threshold 0..1 (default 0.02) and selectors to hide before diff. */
-  visual?: { diffThreshold?: number; ignoreSelectors?: string[] }
+  visual?: { diffThreshold?: number; ignoreSelectors?: string[]; perViewport?: Record<string, number>; thresholdPx?: number }
   /** Budget gates: fail run (non-zero exit in CLI) when violated. e.g. { "maxFindings": { "blocker": 0 } } */
   budgets?: {
     maxFindings?: Record<string, number>
@@ -39,8 +39,13 @@ export interface QualitionRc {
   runs?: { numberOfRuns?: number }
   /** Visual antialias toggle */
   antialias?: boolean
+  antialiasThreshold?: number
   /** Form factor */
   formFactor?: 'desktop' | 'mobile'
+  connectivity?: 'cable' | '3g' | '4g' | '3gfast' | 'native'
+  axe?: { tags?: string[]; disabledRules?: string[]; runOnly?: string[]; level?: 'AA' | 'AAA' }
+  har?: boolean
+  video?: boolean
 }
 
 const RC_NAMES = ['.qualitionrc.json', '.qualitionrc', 'qualition.config.json']
