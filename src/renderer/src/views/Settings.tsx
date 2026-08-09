@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Eye, Plus, RefreshCw, Trash2 } from 'lucide-react'
 import type {
   IntegrationStatus,
@@ -48,7 +48,8 @@ export default function SettingsView({
   const [s, setS] = useState<Settings | null>(null)
   const [models, setModels] = useState<ModelInfo[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
-  const [servers, setServers] = useState<any[]>([])
+  type McpServerInfo = { name: string; role: string; url?: string; command?: string; origin?: string }
+  const [servers, setServers] = useState<McpServerInfo[]>([])
   const [saving, setSaving] = useState(false)
   const [probe, setProbe] = useState<ProviderStatus | null>(null)
   const [regName, setRegName] = useState('')
@@ -65,21 +66,23 @@ export default function SettingsView({
     setLoadingModels(true)
     try {
       setModels(await api.listModels(provider))
+    } catch {
+      setModels([])
     } finally {
       setLoadingModels(false)
     }
   }, [])
 
   useEffect(() => {
-    void api.getSettings().then((loaded) => {
+    api.getSettings().then((loaded) => {
       setS(loaded)
-      void refreshModels(loaded.provider)
-    })
-    void api.mcpServers().then(setServers)
-    void api.listCredentials().then(setCreds)
-    void api.encryptionAvailable().then(setEncryption)
-    void api.appVersion().then(setVersion)
-    void api.updateStatus().then(setUpdate)
+      refreshModels(loaded.provider).catch(() => {})
+    }).catch(() => {})
+    api.mcpServers().then((v) => setServers(v as McpServerInfo[])).catch(() => {})
+    api.listCredentials().then(setCreds).catch(() => {})
+    api.encryptionAvailable().then(setEncryption).catch(() => {})
+    api.appVersion().then(setVersion).catch(() => {})
+    api.updateStatus().then(setUpdate).catch(() => {})
     return api.onUpdateStatus(setUpdate)
   }, [refreshModels])
 
@@ -91,12 +94,23 @@ export default function SettingsView({
     )
   }
 
-  const save = async (patch: Partial<Settings>): Promise<void> => {
-    setSaving(true)
-    const next = await api.setSettings(patch)
-    setS(next)
-    setSaving(false)
-  }
+  const saveQueue = useMemo(() => {
+    let chain: Promise<void> = Promise.resolve()
+    return (patch: Partial<Settings>): Promise<void> => {
+      const run = async (): Promise<void> => {
+        setSaving(true)
+        try {
+          const next = await api.setSettings(patch)
+          setS(next)
+        } finally {
+          setSaving(false)
+        }
+      }
+      chain = chain.then(run, run)
+      return chain
+    }
+  }, [])
+  const save = saveQueue
 
   const currentModel =
     s.provider === 'openai'
@@ -122,11 +136,13 @@ export default function SettingsView({
     s.provider === 'cursor' ||
     !!(s.provider === 'openai' ? s.openaiApiKey : s.provider === 'openrouter' ? s.openrouterApiKey : s.geminiApiKey)
 
-  const q = modelQuery.trim().toLowerCase()
-  const visibleModels = models
-    .filter((m) => !visionOnly || m.vision !== false)
-    .filter((m) => !q || m.id.toLowerCase().includes(q) || (m.label ?? '').toLowerCase().includes(q))
-    .slice(0, 120)
+  const visibleModels = useMemo(() => {
+    const q = modelQuery.trim().toLowerCase()
+    return models
+      .filter((m) => !visionOnly || m.vision !== false)
+      .filter((m) => !q || m.id.toLowerCase().includes(q) || (m.label ?? '').toLowerCase().includes(q))
+      .slice(0, 120)
+  }, [models, modelQuery, visionOnly])
 
   const testConnection = async (): Promise<void> => {
     setProbe(null)
@@ -414,8 +430,13 @@ export default function SettingsView({
           <Input value={regUrl} onChange={setRegUrl} placeholder="https://acme.dev/r/registry.json" />
           <Button
             onClick={() => {
-              if (!regName || !regUrl) return
-              void save({ extraRegistries: [...s.extraRegistries, { name: regName, url: regUrl }] })
+              const n = regName.trim()
+              const u = regUrl.trim()
+              if (!n || !u) return
+              try { new URL(u) } catch { return }
+              if (!/^https?:\/\//.test(u)) return
+              if (s.extraRegistries.some((r) => r.name === n || r.url === u)) return
+              void save({ extraRegistries: [...s.extraRegistries, { name: n, url: u }] })
               setRegName('')
               setRegUrl('')
             }}

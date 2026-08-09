@@ -3,6 +3,7 @@ import { FileText, FolderOpen, MoreHorizontal, RefreshCw, Trash2 } from 'lucide-
 import type { Run } from '../../../shared/types'
 import { api, cx, formatDuration, gradeColor } from '../lib/api'
 import { Badge, Button, Empty, PageHeader, Panel } from '../components/ui'
+import { RunTrend } from '../components/Trend'
 
 export default function Runs({
   runs,
@@ -13,28 +14,48 @@ export default function Runs({
   onOpen: (id: string) => void
   onRefresh: () => void
 }): JSX.Element {
+  const projectFilter = (() => {
+    try {
+      return new URLSearchParams(window.location.hash.split('?')[1] ?? '').get('projectId')
+    } catch {
+      return null
+    }
+  })()
+  const filtered = projectFilter ? runs.filter((r) => (r.projectId ?? r.config.projectId) === projectFilter) : runs
   return (
     <div className="mx-auto max-w-4xl space-y-5 px-6 py-8">
       <PageHeader
         eyebrow="History"
-        title="Runs"
-        description="Every audit kept on this machine — open a report, export markdown, or clear a run."
+        title={projectFilter ? `Runs · ${projectFilter}` : 'Runs'}
+        description={
+          projectFilter
+            ? `Filtered to project ${projectFilter} — ${filtered.length} run(s). Clear the filter to see everything.`
+            : 'Every audit kept on this machine — open a report, export markdown, or clear a run.'
+        }
         actions={
-          <Button size="sm" onClick={onRefresh}>
-            <RefreshCw size={13} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            {projectFilter && (
+              <Button size="sm" variant="ghost" onClick={() => window.history.replaceState(null, '', '#runs')}>
+                Clear filter
+              </Button>
+            )}
+            <Button size="sm" onClick={onRefresh}>
+              <RefreshCw size={13} />
+              Refresh
+            </Button>
+          </div>
         }
       />
 
+      {filtered.length >= 2 && <RunTrend runs={filtered} />}
       <Panel bodyClassName="p-2" className="animate-fade-up">
-        {runs.length === 0 ? (
+        {filtered.length === 0 ? (
           <Empty title="No audits yet" icon={<FileText size={18} />}>
             Start one from New audit — results land here.
           </Empty>
         ) : (
           <ul className="space-y-1">
-            {runs.map((r) => (
+            {filtered.map((r) => (
               <RunRow key={r.id} run={r} onOpen={onOpen} onRefresh={onRefresh} />
             ))}
           </ul>
@@ -77,9 +98,20 @@ function RunRow({
         {r.scorecard?.grade ?? '–'}
       </button>
       <button onClick={() => onOpen(r.id)} className="min-w-0 flex-1 text-left">
-        <div className="truncate text-[13px] font-medium text-zinc-100 group-hover:underline">
-          {r.config.targetUrl}
+        <div className="flex items-center gap-1.5 truncate text-[13px] font-medium text-zinc-100 group-hover:underline">
+          <span className="truncate">{r.config.targetUrl}</span>
+          {(r.projectId || r.config.projectId) && (
+            <span className="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{r.projectId ?? r.config.projectId}</span>
+          )}
+          {r.config.diffMode === 'changed-only' && (
+            <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300">diff</span>
+          )}
         </div>
+        {r.diffSummary && (
+          <div className="mt-1 text-[11px] text-zinc-500">
+            vs {r.diffSummary.baselineRunId.slice(0, 8)} · {r.diffSummary.changedPages} changed / {r.diffSummary.unchangedPages} unchanged · {r.diffSummary.newPages} new
+          </div>
+        )}
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
           <span>{new Date(r.createdAt).toLocaleString()}</span>
           {r.finishedAt && (
@@ -99,6 +131,8 @@ function RunRow({
           <span className="text-zinc-700">·</span>
           <span className="capitalize">{r.config.brutality}</span>
           <Badge className={statusClass}>{r.status}</Badge>
+          {r.approved === false && <Badge className="border-amber-500/30 bg-amber-500/10 text-amber-300">not baseline</Badge>}
+          {r.git?.branch && <span className="rounded bg-zinc-800 px-1 py-0.5 font-mono text-[10px] text-zinc-500">{r.git.branch}</span>}
         </div>
       </button>
       <div className="flex shrink-0 items-center gap-1.5 opacity-80 transition-opacity group-hover:opacity-100">
@@ -131,6 +165,17 @@ function RunRow({
                   <FolderOpen size={12} />
                   Reveal files
                 </MenuItem>
+                {r.approved === false && (
+                  <MenuItem
+                    onClick={async () => {
+                      setMenu(false)
+                      await api.approveRun(r.id)
+                      onRefresh()
+                    }}
+                  >
+                    Approve as baseline
+                  </MenuItem>
+                )}
                 <MenuItem
                   danger
                   onClick={async () => {

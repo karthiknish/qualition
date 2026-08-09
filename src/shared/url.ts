@@ -10,7 +10,22 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]'
 
 export function isLocalHost(hostname: string): boolean {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  return LOCAL_HOSTS.has(h) || h.endsWith('.local') || h.endsWith('.localhost') || /^192\.168\./.test(h) || /^10\./.test(h)
+  if (LOCAL_HOSTS.has(h)) return true
+  if (h.endsWith('.local') || h.endsWith('.localhost')) return true
+  if (/^192\.168\./.test(h)) return true
+  if (/^10\./.test(h)) return true
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(h)) return true
+  if (/^169\.254\./.test(h)) return true
+  if (h === '::ffff:127.0.0.1' || h.startsWith('::ffff:10.') || h.startsWith('::ffff:192.168.')) return true
+  if (h.startsWith('fd') || h.startsWith('fc')) return true
+  if (h === 'metadata.google.internal' || h.endsWith('.internal')) return true
+  return false
+}
+
+/** Returns true for SSRF-sensitive metadata endpoints that should never be crawled. */
+export function isMetadataHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return h === '169.254.169.254' || h === 'metadata.google.internal' || h === 'instance-data' || /^169\.254\./.test(h)
 }
 
 /**
@@ -90,12 +105,16 @@ export function isIgnoredPage(url: string, patterns: string[] | undefined | null
   let path: string
   let hrefNoHash: string
   try {
-    const u = new URL(url)
-    path = u.pathname.replace(/\/+$/, '') || '/'
+    const u = new URL(decodeURIComponent(url))
+    path = decodeURIComponent(u.pathname).replace(/\/+$/, '') || '/'
     hrefNoHash = `${u.origin}${path}${u.search}`
   } catch {
-    path = url
-    hrefNoHash = url
+    try {
+      path = decodeURIComponent(url)
+    } catch {
+      path = url
+    }
+    hrefNoHash = path
   }
 
   for (const raw of patterns) {

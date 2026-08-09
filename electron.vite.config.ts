@@ -7,12 +7,14 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
-      rollupOptions: { input: { index: resolve('src/main/index.ts') } }
+      sourcemap: false,
+      rollupOptions: { input: { index: resolve('src/main/index.ts'), cli: resolve('src/cli.ts') } }
     }
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
     build: {
+      sourcemap: false,
       rollupOptions: { input: { index: resolve('src/preload/index.ts') } }
     }
   },
@@ -23,7 +25,18 @@ export default defineConfig({
     },
     plugins: [react(), tailwindcss()],
     build: {
-      rollupOptions: { input: { index: resolve('src/renderer/index.html') } }
+      sourcemap: false,
+      chunkSizeWarningLimit: 800,
+      rollupOptions: {
+        input: { index: resolve('src/renderer/index.html') },
+        output: {
+          manualChunks: {
+            react: ['react', 'react-dom'],
+            charts: ['recharts'],
+            ui: ['lucide-react', 'clsx', 'tailwind-merge']
+          }
+        }
+      }
     }
   }
 })

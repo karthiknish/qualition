@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import {
   Compass,
   FileBarChart2,
+  FolderKanban,
   History,
   Radar,
   Settings as SettingsIcon,
@@ -11,17 +12,21 @@ import {
 import type { IntegrationStatus, Run, RunProgress } from '../../shared/types'
 import { api, cx, formatDuration } from './lib/api'
 import { BrandLogo, providerBrand, type BrandId } from './components/BrandLogo'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import NewRun from './views/NewRun'
-import Runs from './views/Runs'
-import Report from './views/Report'
-import Explore from './views/Explore'
-import SettingsView from './views/Settings'
 import UpdateBanner from './components/UpdateBanner'
 
-type View = 'new' | 'runs' | 'report' | 'explore' | 'settings'
+const Runs = lazy(() => import('./views/Runs'))
+const Report = lazy(() => import('./views/Report'))
+const Explore = lazy(() => import('./views/Explore'))
+const SettingsView = lazy(() => import('./views/Settings'))
+const Projects = lazy(() => import('./views/Projects'))
+
+type View = 'new' | 'projects' | 'runs' | 'report' | 'explore' | 'settings'
 
 const NAV: { id: View; label: string; hint: string; icon: LucideIcon }[] = [
   { id: 'new', label: 'New audit', hint: 'Point it at a URL', icon: Radar },
+  { id: 'projects', label: 'Projects', hint: 'By origin · diff', icon: FolderKanban },
   { id: 'runs', label: 'Runs', hint: 'History', icon: History },
   { id: 'report', label: 'Report', hint: 'Findings & fixes', icon: FileBarChart2 },
   { id: 'explore', label: 'Explore', hint: 'Mobbin + registry', icon: Compass },
@@ -29,20 +34,44 @@ const NAV: { id: View; label: string; hint: string; icon: LucideIcon }[] = [
 ]
 
 export default function App(): JSX.Element {
-  const [view, setView] = useState<View>('new')
+  const [view, setView] = useState<View>(() => {
+    const hash = window.location.hash.replace('#', '').split('?')[0] as View
+    return (['new', 'projects', 'runs', 'report', 'explore', 'settings'] as View[]).includes(hash) ? hash : 'new'
+  })
   const [runs, setRuns] = useState<Run[]>([])
-  const [activeId, setActiveId] = useState<string | null>(null)
+  const [activeId, setActiveId] = useState<string | null>(() => {
+    try {
+      const h = new URLSearchParams(window.location.hash.split('?')[1] ?? '')
+      return h.get('runId')
+    } catch {
+      return null
+    }
+  })
   const [progress, setProgress] = useState<RunProgress | null>(null)
   const [status, setStatus] = useState<IntegrationStatus | null>(null)
   const [cancelling, setCancelling] = useState<string | null>(null)
   const [version, setVersion] = useState('')
+  const [appError, setAppError] = useState<string | null>(null)
 
-  const refresh = useCallback(async () => setRuns(await api.listRuns()), [])
+  const refresh = useCallback(async () => {
+    try {
+      setRuns(await api.listRuns())
+      setAppError(null)
+    } catch (e) {
+      setAppError((e as Error).message)
+    }
+  }, [])
+
+  // Persist view + activeId in hash for reload/back
+  useEffect(() => {
+    const hash = activeId ? `#${view}?runId=${encodeURIComponent(activeId)}` : `#${view}`
+    if (window.location.hash !== hash) window.history.replaceState(null, '', hash)
+  }, [view, activeId])
 
   useEffect(() => {
-    void refresh()
-    void api.status().then(setStatus)
-    void api.appVersion().then(setVersion)
+    refresh().catch(() => {})
+    api.status().then(setStatus).catch(() => {})
+    api.appVersion().then(setVersion).catch(() => {})
     const offP = api.onProgress(setProgress)
     const offU = api.onRunUpdate((r) => {
       setRuns((prev) => {
@@ -53,9 +82,15 @@ export default function App(): JSX.Element {
         return next
       })
     })
+    const onHash = (): void => {
+      const hash = window.location.hash.replace('#', '').split('?')[0] as View
+      if ((['new', 'projects', 'runs', 'report', 'explore', 'settings'] as View[]).includes(hash)) setView(hash)
+    }
+    window.addEventListener('hashchange', onHash)
     return () => {
       offP()
       offU()
+      window.removeEventListener('hashchange', onHash)
     }
   }, [refresh])
 
@@ -81,6 +116,7 @@ export default function App(): JSX.Element {
   const openRun = (id: string): void => {
     setActiveId(id)
     setView('report')
+    window.history.replaceState(null, '', `#report?runId=${encodeURIComponent(id)}`)
   }
 
   const modelBrand = providerBrand(status?.model.id)
@@ -137,13 +173,17 @@ export default function App(): JSX.Element {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <nav className="flex w-56 shrink-0 flex-col gap-1 border-r border-zinc-800/80 bg-zinc-950/40 p-3">
+        <nav aria-label="Main navigation" className="flex w-56 shrink-0 flex-col gap-1 border-r border-zinc-800/80 bg-zinc-950/40 p-3">
+          <div role="tablist" aria-orientation="vertical" className="flex flex-col gap-1">
           {NAV.map((n) => {
             const active = view === n.id
             const Icon = n.icon
             return (
               <button
                 key={n.id}
+                role="tab"
+                aria-selected={active}
+                aria-current={active ? 'page' : undefined}
                 onClick={() => setView(n.id)}
                 className={cx(
                   'group relative rounded-xl px-3 py-2.5 text-left transition-colors',
@@ -169,6 +209,7 @@ export default function App(): JSX.Element {
               </button>
             )
           })}
+          </div>
 
           <div className="mt-auto space-y-2 px-0.5 pb-1">
             {running && (
@@ -228,6 +269,13 @@ export default function App(): JSX.Element {
         </nav>
 
         <main className="app-atmosphere min-w-0 flex-1 overflow-y-auto">
+          {appError && (
+            <div className="mx-6 mt-4 rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-300" role="alert">
+              {appError}
+            </div>
+          )}
+          <Suspense fallback={<div className="p-8 text-sm text-zinc-500 animate-pulse">Loading…</div>}>
+          <ErrorBoundary>
           {view === 'new' && (
             <NewRun
               status={status}
@@ -238,10 +286,13 @@ export default function App(): JSX.Element {
               }}
             />
           )}
+          {view === 'projects' && <Projects onOpenProject={(pid) => { setView('runs'); window.history.replaceState(null, '', `#runs?projectId=${encodeURIComponent(pid)}`) }} />}
           {view === 'runs' && <Runs runs={runs} onOpen={openRun} onRefresh={refresh} />}
           {view === 'report' && <Report run={activeRun} progress={progress} />}
           {view === 'explore' && <Explore runId={activeRun?.id} />}
           {view === 'settings' && <SettingsView onStatus={setStatus} status={status} />}
+          </ErrorBoundary>
+          </Suspense>
         </main>
       </div>
     </div>
@@ -264,6 +315,8 @@ function StatusPill({
   return (
     <span
       title={detail}
+      role="status"
+      aria-label={`${label}: ${ok === undefined ? 'unknown' : ok ? 'ok' : 'error'}${detail ? ` — ${detail}` : ''}`}
       className={cx(
         'flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] uppercase tracking-wider transition-colors',
         ok === undefined

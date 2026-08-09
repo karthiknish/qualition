@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   IntegrationStatus,
   ModelInfo,
+  Project,
   ProviderId,
   ProviderStatus,
   SavedCredential,
@@ -22,26 +23,32 @@ const api = {
   status: (): Promise<IntegrationStatus> => ipcRenderer.invoke('status:all'),
   mcpServers: (): Promise<unknown[]> => ipcRenderer.invoke('mcp:servers'),
 
-  listRuns: (): Promise<Run[]> => ipcRenderer.invoke('runs:list'),
+  listRuns: (projectId?: string): Promise<Run[]> => ipcRenderer.invoke('runs:list', projectId),
   getRun: (id: string): Promise<Run | null> => ipcRenderer.invoke('runs:get', id),
+  listProjects: (): Promise<Project[]> => ipcRenderer.invoke('projects:list'),
+  getProject: (id: string): Promise<Project | null> => ipcRenderer.invoke('projects:get', id),
+  updateProject: (id: string, name: string): Promise<Project | null> => ipcRenderer.invoke('projects:update', { id, name }),
+  approveRun: (id: string): Promise<Run> => ipcRenderer.invoke('runs:approve', id),
   startRun: (config: RunConfig): Promise<Run> => ipcRenderer.invoke('runs:start', config),
   cancelRun: (id: string): Promise<void> => ipcRenderer.invoke('runs:cancel', id),
   deleteRun: (id: string): Promise<void> => ipcRenderer.invoke('runs:delete', id),
   revealRun: (id: string): Promise<string> => ipcRenderer.invoke('runs:reveal', id),
   exportRun: (id: string): Promise<string | null> => ipcRenderer.invoke('runs:export', id),
+  exportSarif: (id: string): Promise<string | null> => ipcRenderer.invoke('runs:exportSarif', id),
+  exportHtml: (id: string): Promise<string | null> => ipcRenderer.invoke('runs:exportHtml', id),
   buildPrompt: (
     id: string,
     options?: { scope?: 'all' | 'critical' | 'accessibility' | 'coherence' | 'section'; sectionId?: string; pageUrl?: string }
   ): Promise<string | null> => ipcRenderer.invoke('runs:prompt', { id, options }),
 
-  searchRegistry: (q: string): Promise<any[]> => ipcRenderer.invoke('registry:search', q),
+  searchRegistry: (q: string): Promise<{ name: string; registry: string; type?: string; description?: string; addCommand?: string; docs?: string }[]> => ipcRenderer.invoke('registry:search', q),
   componentDetail: (input: {
     name: string
     registry: string
     homepage?: string
     addCommandArgument?: string
-  }): Promise<any> => ipcRenderer.invoke('components:detail', input),
-  searchMobbin: (query: string, kind: 'screen' | 'section', runId?: string): Promise<any[]> =>
+  }): Promise<{ name: string; registry: string; files?: string[]; dependencies?: string[] }> => ipcRenderer.invoke('components:detail', input),
+  searchMobbin: (query: string, kind: 'screen' | 'section', runId?: string): Promise<{ title: string; appName?: string; imageUrl: string; mobbinUrl?: string }[]> =>
     ipcRenderer.invoke('mobbin:search', { query, kind, runId }),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('shell:open', url),
 

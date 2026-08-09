@@ -50,8 +50,8 @@ function isPurpleish(c: string): boolean {
   const rgb = rgbOf(c)
   if (!rgb || rgb.alpha < 0.4) return false
   const { r, g, b } = rgb
-  // Violet / purple: blue+red dominate green, not near grey.
-  return b > 120 && r > 80 && r > g + 20 && b > g + 30 && Math.abs(r - b) < 100
+  // Violet / purple: blue+red dominate green, not near grey. Allow saturated violet (R 90-140, B 180-250).
+  return b > 120 && r > 70 && r > g + 18 && b > g + 28 && Math.abs(r - b) < 130
 }
 
 function isCyanOnDark(fg: string, bg: string): boolean {
@@ -103,15 +103,25 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
   }
 
   const fonts = t.fontFamilies.map((f) => f.value)
+  const fontUsages = t.fontFamilies.map((f) => ({ name: f.value, usage: f.usage }))
   const overused = fonts.filter((f) => OVERUSED_FONTS.test(f.split(',')[0].trim()))
-  if (overused.length && overused[0] === fonts[0]) {
+  // Only flag when the *only* distinctive voice is an overused default.
+  // Geist/Inter + Geist Mono (shadcn) or Inter + serif display are intentional pairings — not slop.
+  const hasDistinctPairing =
+    fontUsages.length >= 2 &&
+    /mono|serif|display|instrument|fraunces|newsreader|jetbrains|fira|space mono/i.test(fontUsages[1]?.name ?? '')
+  const monoCompanion = fonts.slice(1).some((f) => /mono/i.test(f))
+  const totalUsage = fontUsages.reduce((s, f) => s + f.usage, 0) || 1
+  const topUsage = fontUsages[0]?.usage ?? 0
+  const topDominates = topUsage / totalUsage > 0.65
+  if (overused.length && overused[0] === fonts[0] && !hasDistinctPairing && !monoCompanion && topDominates && fonts.length <= 2) {
     out.push(
       mk(
         page,
-        'major',
+        'minor',
         `Overused font “${overused[0]}” dominates the UI`,
-        'Inter / Roboto / Geist / Plus Jakarta / Space Grotesk are the default AI type stack — they no longer feel intentional.',
-        'Pick a distinctive face (or a deliberate pairing) that matches the product voice. See impeccable.style/slop · overused-font.',
+        'Inter / Roboto / Geist / Plus Jakarta / Space Grotesk are the default AI type stack — pair with a distinctive display or mono companion.',
+        'Pick a distinctive face (or keep the pairing) that matches the product voice. See impeccable.style/slop · overused-font.',
         { evidence: fonts.slice(0, 4) }
       )
     )
@@ -120,14 +130,16 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
   const bgs = t.colors.filter((c) => c.role === 'bg')
   const texts = t.colors.filter((c) => c.role === 'text')
   const purpleHits = bgs.filter((c) => isPurpleish(c.value))
-  if (purpleHits.length >= 2 || (purpleHits[0] && purpleHits[0].usage >= 8)) {
+  // Linear (#5E6AD2) and Stripe violet are intentional brand accents — require stronger signal.
+  const purpleUsage = purpleHits.reduce((s, c) => s + c.usage, 0)
+  if (purpleHits.length >= 3 || purpleUsage >= 16 || (purpleHits.length >= 2 && purpleUsage >= 10)) {
     out.push(
       mk(
         page,
-        'major',
-        'AI purple / violet palette',
-        `Purple-violet surfaces show up ${purpleHits.reduce((s, c) => s + c.usage, 0)}× — the most recognizable AI-generated colour tell.`,
-        'Choose a distinctive, intentional palette. Ban purple-to-blue gradients as decoration. See impeccable.style/slop · ai-color-palette.',
+        'minor',
+        'Purple / violet palette',
+        `Purple-violet surfaces show up ${purpleUsage}× — verify it is brand-intentional, not the default AI violet.`,
+        'If intentional, keep it anchored to brand tokens; otherwise choose a distinctive palette. See impeccable.style/slop · ai-color-palette.',
         { evidence: purpleHits.slice(0, 3).map((c) => c.value) }
       )
     )
@@ -192,14 +204,14 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
     )
   }
 
-  if ((slop.gradientTexts ?? 0) >= 1) {
+  if ((slop.gradientTexts ?? 0) >= 2) {
     out.push(
       mk(
         page,
-        'major',
+        'minor',
         'Gradient text',
-        `${slop.gradientTexts} text node(s) use gradient fills — decorative AI tell on headings/metrics.`,
-        'Use solid colours for text. See impeccable.style/slop · gradient-text.'
+        `${slop.gradientTexts} text node(s) use gradient fills — verify headings are brand-intentional.`,
+        'Use solid colours for body text; reserve gradients for hero display only. See impeccable.style/slop · gradient-text.'
       )
     )
   }
@@ -216,14 +228,15 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
     )
   }
 
-  if ((slop.sideTabBorders ?? 0) >= 1) {
+  // Stripe/Vercel use left-border accents for status intentionally — require repeated pattern.
+  if ((slop.sideTabBorders ?? 0) >= 3) {
     out.push(
       mk(
         page,
-        'major',
+        'minor',
         'Side colour accents on cards / sections',
-        `${slop.sideTabBorders} card, section, or list item(s) use a thick coloured border on one side — the classic AI “side-tab” tell. Do not add side colour stripes to cards, panels, or sections.`,
-        'Remove the one-sided accent border. Signal status with a badge, icon, or text — not a coloured left/right edge. See impeccable.style/slop · side-tab.',
+        `${slop.sideTabBorders} card, section, or list item(s) use a thick coloured border on one side — often AI side-tab decoration.`,
+        'Verify each accent is semantic (status) — otherwise signal with badge/icon, not edge stripe. See impeccable.style/slop · side-tab.',
         { effort: 'one-line' }
       )
     )
@@ -241,26 +254,27 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
     )
   }
 
-  if ((slop.iconTileHeadings ?? 0) >= 3) {
+  if ((slop.iconTileHeadings ?? 0) >= 5) {
     out.push(
       mk(
         page,
-        'minor',
+        'nit',
         'Icon-tile feature stack',
-        `${slop.iconTileHeadings} rounded icon tile(s) stacked above headings — universal AI feature-card template.`,
-        'Try side-by-side icon + heading, or drop the tile container. See impeccable.style/slop · icon-tile-stack.'
+        `${slop.iconTileHeadings} rounded icon tile(s) stacked above headings — repeated AI feature-card template.`,
+        'Vary density: side-by-side icon + heading or drop the tile container on some cards. See impeccable.style/slop · icon-tile-stack.'
       )
     )
   }
 
-  if ((slop.heroEyebrowChips ?? 0) >= 1) {
+  // Every Linear/Stripe/Vercel hero uses an eyebrow — only flag when multiple chips clutter.
+  if ((slop.heroEyebrowChips ?? 0) >= 2) {
     out.push(
       mk(
         page,
-        'minor',
-        'Hero eyebrow / pill chip',
-        'Tiny uppercase tracked label (or pill) above a large hero headline is the default AI SaaS hero.',
-        'Drop the eyebrow, fold it into the headline, or use a real breadcrumb. See impeccable.style/slop · hero-eyebrow-chip.'
+        'nit',
+        'Hero eyebrow / pill chips',
+        `${slop.heroEyebrowChips} eyebrow pill(s) above hero headlines — hero is starting to read as template.`,
+        'Keep at most one eyebrow; fold extras into headline or breadcrumb. See impeccable.style/slop · hero-eyebrow-chip.'
       )
     )
   }
@@ -277,18 +291,18 @@ export function auditImpeccableSlop(page: CapturedPage): Finding[] {
     )
   }
 
-  // Pill-everything: too many full radii.
+  // Pill-everything: only flag when pills dominate *and* cards use them — Vercel/Linear pills are intentional.
   const fullRadii = t.radii.filter((r) => r.value === 'full' || parseFloat(r.value) >= 999)
   const totalRadiusUsage = t.radii.reduce((s, r) => s + r.usage, 0) || 1
   const fullUsage = fullRadii.reduce((s, r) => s + r.usage, 0)
-  if (fullUsage / totalRadiusUsage > 0.45 && fullUsage >= 12) {
+  if (fullUsage / totalRadiusUsage > 0.6 && fullUsage >= 20 && slop.nestedCards === undefined) {
     out.push(
       mk(
         page,
         'nit',
         'Pill radius overuse',
-        `${fullUsage} elements use full/pill radius — common AI over-rounding.`,
-        'Reserve pills for true chips/tags; use a tighter radius language for cards and controls.'
+        `${fullUsage} elements use full/pill radius — verify cards are not all pills.`,
+        'Reserve pills for chips/tags; use a tighter radius for cards.'
       )
     )
   }

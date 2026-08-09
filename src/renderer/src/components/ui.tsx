@@ -111,7 +111,8 @@ export function Input({
   placeholder,
   type = 'text',
   className,
-  autoFocus
+  autoFocus,
+  id
 }: {
   value: string
   onChange: (v: string) => void
@@ -119,9 +120,11 @@ export function Input({
   type?: string
   className?: string
   autoFocus?: boolean
+  id?: string
 }): JSX.Element {
   return (
     <input
+      id={id}
       type={type}
       value={value}
       placeholder={placeholder}

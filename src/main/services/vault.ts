@@ -31,11 +31,13 @@ function vaultPath(): string {
   return join(app.getPath('userData'), 'credentials.json')
 }
 
-export function originOf(url: string): string {
+export function originOf(url: string): string | null {
   try {
-    return new URL(url).origin
+    const u = new URL(url)
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null
+    return u.origin
   } catch {
-    return url
+    return null
   }
 }
 
@@ -51,7 +53,26 @@ async function readAll(): Promise<StoredCredential[]> {
 
 async function writeAll(items: StoredCredential[]): Promise<void> {
   await mkdir(app.getPath('userData'), { recursive: true })
-  await writeFile(vaultPath(), JSON.stringify(items, null, 2), 'utf8')
+  const { writeFile: wf, chmod, rename, unlink } = await import('node:fs/promises')
+  const tmp = `${vaultPath()}.tmp.${Date.now()}`
+  await wf(tmp, JSON.stringify(items, null, 2), 'utf8')
+  try {
+    await chmod(tmp, 0o600)
+  } catch {}
+  try {
+    await rename(tmp, vaultPath())
+  } catch {
+    await wf(vaultPath(), JSON.stringify(items, null, 2), 'utf8')
+    try {
+      await chmod(vaultPath(), 0o600)
+    } catch {}
+    try {
+      await unlink(tmp)
+    } catch {}
+  }
+  try {
+    await chmod(vaultPath(), 0o600)
+  } catch {}
 }
 
 export function encryptionAvailable(): boolean {
@@ -86,6 +107,7 @@ export async function saveCredential(input: {
   submitSelector?: string
 }): Promise<SavedCredential> {
   const origin = originOf(input.origin)
+  if (!origin) throw new Error(`Invalid origin: ${input.origin}`)
   const canEncrypt = encryptionAvailable()
   const secret = canEncrypt
     ? safeStorage.encryptString(input.password).toString('base64')
@@ -111,6 +133,7 @@ export async function saveCredential(input: {
 
 export async function deleteCredential(origin: string): Promise<void> {
   const target = originOf(origin)
+  if (!target) throw new Error(`Invalid origin: ${origin}`)
   await writeAll((await readAll()).filter((c) => c.origin !== target))
 }
 
@@ -139,6 +162,7 @@ export async function resolveCredential(url: string): Promise<{
   submitSelector?: string
 } | null> {
   const origin = originOf(url)
+  if (!origin) return credentialFromEnv()
   const found = (await readAll()).find((c) => c.origin === origin)
   // The keychain wins; env is the fallback for environments without one.
   if (!found) return credentialFromEnv()

@@ -40,12 +40,25 @@ console.log('registry:', await registryStatus())
 console.log('shoogle:', await shoogleStatus())
 console.log('mobbin:', await mobbinStatus())
 
-const browser = await launch()
-const pages = await crawl(browser, target, config.maxPages, {
-  viewports: config.viewports,
-  outDir: dir,
-  onLog: (m) => console.log('  ·', m)
-})
+let browser: Awaited<ReturnType<typeof launch>> | undefined
+let pages: Awaited<ReturnType<typeof crawl>> = []
+const watchdog = setTimeout(() => {
+  console.error('smoke watchdog: timed out after 5 minutes')
+  try { browser?.close().catch(() => {}) } catch {}
+  process.exit(1)
+}, 5 * 60_000)
+if (watchdog.unref) watchdog.unref()
+try {
+  browser = await launch()
+  pages = await crawl(browser, target, config.maxPages, {
+    viewports: config.viewports,
+    outDir: dir,
+    onLog: (m) => console.log('  ·', m)
+  })
+} finally {
+  clearTimeout(watchdog)
+}
+if (!browser) throw new Error('browser failed to launch')
 const browser2 = browser
 
 const findings: Finding[] = []
@@ -92,7 +105,6 @@ const { report, findings: probeFindings } = await probeInteractions(browser2, ta
   maxControls: 25,
   onLog: (m) => console.log('  probe·', m)
 })
-await browser2.close()
 console.log('\nINTERACTION PROBE')
 console.log(` controls exercised: ${report.controlsProbed} | tab stops: ${report.keyboard.tabStops} | positive tabindex: ${report.keyboard.positiveTabIndex}`)
 console.log(` dead clicks: ${report.deadClicks.length} ${report.deadClicks.slice(0, 4).join(', ')}`)
@@ -117,7 +129,23 @@ if (s0) {
   }
 }
 
-// MCP transports keep open streams; without this the CLI never exits.
-await Promise.allSettled([closeMobbin(), closeShoogle()])
-console.log('\ndone.')
-process.exit(0)
+let exitCode = 0
+try {
+  if (pages.length === 0) {
+    console.error('smoke failed: no pages captured')
+    exitCode = 1
+  } else if (pages[0]?.status && pages[0].status >= 400) {
+    console.error(`smoke failed: page status ${pages[0].status}`)
+    exitCode = 1
+  }
+} finally {
+  try { await browser2.close().catch(() => {}) } catch {}
+  try {
+    await Promise.race([
+      Promise.allSettled([closeMobbin(), closeShoogle()]),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('MCP close timeout')), 5000))
+    ])
+  } catch {}
+}
+console.log(exitCode === 0 ? '\ndone.' : '\ndone with failures.')
+process.exit(exitCode)

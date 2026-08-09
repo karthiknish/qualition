@@ -719,6 +719,26 @@ export const extractFn = function (): any {
   const perf = (() => {
     const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined
     const res = performance.getEntriesByType('resource') as PerformanceResourceTiming[]
+    // FCP from paint entries; TBT estimate from longtask sum over 50ms threshold
+    let fcpMs: number | null = null
+    try {
+      const paints = performance.getEntriesByType('paint') as PerformanceEntry[]
+      const fcp = paints.find((p) => p.name === 'first-contentful-paint') as any
+      if (fcp) fcpMs = Math.round(fcp.startTime)
+    } catch {}
+    if (fcpMs == null && (window as any).__q_fcp != null) fcpMs = Math.round((window as any).__q_fcp)
+    let tbtMs: number | null = null
+    try {
+      const lts = ((window as any).__q_longtask_entries as any[]) ?? []
+      // Approx TBT: sum(longtask.duration - 50)
+      let tbt = 0
+      for (const e of lts) {
+        const d = Number(e.duration ?? e.value ?? 0)
+        if (d > 50) tbt += d - 50
+      }
+      if (tbt > 0) tbtMs = Math.round(tbt)
+      else if ((window as any).__q_longtask) tbtMs = Math.max(0, ((window as any).__q_longtask as number) > 50 ? ((window as any).__q_longtask as number) - 50 : 0) || null
+    } catch {}
     return {
       ttfbMs: nav ? Math.round(nav.responseStart) : 0,
       domContentLoadedMs: nav ? Math.round(nav.domContentLoadedEventEnd) : 0,
@@ -726,7 +746,10 @@ export const extractFn = function (): any {
       transferBytes: res.reduce((s, r) => s + (r.transferSize || 0), 0) + (nav?.transferSize ?? 0),
       requestCount: res.length,
       lcpMs: (window as any).__q_lcp ?? null,
+      fcpMs,
       cls: (window as any).__q_cls ?? null,
+      tbtMs,
+      inpMs: (window as any).__q_inp ?? null,
       longTaskMs: (window as any).__q_longtask ?? 0
     }
   })()
@@ -1366,6 +1389,7 @@ export const extractFn = function (): any {
 
   return {
     title: document.title,
+    html: document.documentElement.outerHTML.slice(0, 500_000),
     tokens,
     sections,
     responsive: { horizontalOverflowPx, tinyTextCount, smallTapTargets, overlaps },
@@ -1508,6 +1532,9 @@ export const observerInit = function (): void {
   try {
     ;(window as any).__q_cls = 0
     ;(window as any).__q_longtask = 0
+    ;(window as any).__q_longtask_entries = []
+    ;(window as any).__q_fcp = null
+    ;(window as any).__q_inp = null
     new PerformanceObserver((list) => {
       for (const e of list.getEntries()) (window as any).__q_lcp = Math.round(e.startTime)
     }).observe({ type: 'largest-contentful-paint', buffered: true })
@@ -1516,8 +1543,27 @@ export const observerInit = function (): void {
         if (!e.hadRecentInput) (window as any).__q_cls += e.value
     }).observe({ type: 'layout-shift', buffered: true })
     new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) (window as any).__q_longtask += Math.round(e.duration)
+      for (const e of list.getEntries() as any) {
+        ;(window as any).__q_longtask += Math.round(e.duration)
+        ;(window as any).__q_longtask_entries.push({ duration: e.duration, startTime: e.startTime })
+      }
     }).observe({ type: 'longtask', buffered: true })
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries() as any) {
+        if (e.name === 'first-contentful-paint') (window as any).__q_fcp = Math.round(e.startTime)
+      }
+    }).observe({ type: 'paint', buffered: true })
+    // INP via event timing when available
+    try {
+      new PerformanceObserver((list) => {
+        let max = 0
+        for (const e of list.getEntries() as any) {
+          const d = Number(e.duration ?? 0)
+          if (d > max) max = d
+        }
+        if (max > ((window as any).__q_inp ?? 0)) (window as any).__q_inp = Math.round(max)
+      }).observe({ type: 'event', buffered: true, durationThreshold: 16 } as any)
+    } catch {}
   } catch {
     /* unsupported */
   }

@@ -33,6 +33,7 @@ export default function NewRun({
   const [useGemini, setUseGemini] = useState(true)
   const [useLighthouse, setUseLighthouse] = useState(true)
   const [probe, setProbe] = useState(true)
+  const [diffMode, setDiffMode] = useState<'full' | 'changed-only'>('full')
   const [flowText, setFlowText] = useState('')
   const [busy, setBusy] = useState(false)
   const [authOpen, setAuthOpen] = useState(false)
@@ -48,7 +49,7 @@ export default function NewRun({
   const [encryption, setEncryption] = useState(true)
 
   useEffect(() => {
-    void api.getSettings().then((s) => {
+    api.getSettings().then((s) => {
       setSettings(s)
       setBrutality(s.defaultBrutality)
       setMaxPages(s.maxPages)
@@ -57,14 +58,27 @@ export default function NewRun({
         setEmail(s.lastAuthUsername)
         setAuthOpen(true)
       }
-    })
-    void api.defaultViewports().then((v) => {
+    }).catch(() => {})
+    api.defaultViewports().then((v) => {
       setViewports(v)
       setEnabledVps(Object.fromEntries(v.map((x) => [x.name, true])))
-    })
-    void api.listCredentials().then(setSaved)
-    void api.encryptionAvailable().then(setEncryption)
+    }).catch(() => {})
+    api.listCredentials().then(setSaved).catch(() => {})
+    api.encryptionAvailable().then(setEncryption).catch(() => {})
+    // Restore draft from localStorage
+    try {
+      const draft = JSON.parse(localStorage.getItem('qualition:newRun:draft') ?? 'null')
+      if (draft?.url) setUrl(draft.url)
+      if (draft?.context) setContext(draft.context)
+      if (draft?.flowText) setFlowText(draft.flowText)
+    } catch {}
   }, [])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('qualition:newRun:draft', JSON.stringify({ url, context, flowText }))
+    } catch {}
+  }, [url, context, flowText])
 
   // Offer a saved login as soon as the URL points at an origin we know.
   useEffect(() => {
@@ -74,7 +88,7 @@ export default function NewRun({
       setMatchedCred(null)
       return
     }
-    void api.originOf(normalized).then((origin) => {
+    api.originOf(normalized).then((origin) => {
       if (cancelled) return
       const hit = saved.find((c) => c.origin === origin) ?? null
       setMatchedCred(hit)
@@ -82,17 +96,29 @@ export default function NewRun({
         setAuthOpen(true)
         setEmail((prev) => prev || hit.username)
       }
+    }).catch(() => {
+      if (!cancelled) setMatchedCred(null)
     })
     return () => {
       cancelled = true
     }
   }, [url, saved])
 
+  const [flowError, setFlowError] = useState<string | null>(null)
   const start = async (): Promise<void> => {
+    if (busy) return
+    const parsed = parseFlows(flowText)
+    if (parsed.error) {
+      setFlowError(parsed.error)
+      return
+    }
+    setFlowError(null)
+    const normalizedUrl = normalizeTargetUrl(url)
+    if (!isValidTarget(url)) return
     setBusy(true)
     try {
       const config: RunConfig = {
-        targetUrl: normalizeTargetUrl(url) ?? url.trim(),
+        targetUrl: normalizedUrl ?? url.trim(),
         productionUrl: productionUrl.trim() ? normalizeTargetUrl(productionUrl) ?? productionUrl.trim() : undefined,
         maxPages,
         ignorePages: parseIgnorePages(ignorePages),
@@ -111,7 +137,8 @@ export default function NewRun({
               : settings?.geminiModel) ?? 'gemini-3.6-flash',
         brutality,
         productContext: context.trim(),
-        flows: parseFlows(flowText),
+        flows: parsed.flows,
+        diffMode,
         auth:
           authOpen && (password || matchedCred)
             ? {
@@ -126,8 +153,10 @@ export default function NewRun({
               }
             : undefined
       }
-      if (authOpen && email.trim()) void api.setSettings({ lastAuthUsername: email.trim() })
+      if (authOpen && email.trim()) void api.setSettings({ lastAuthUsername: email.trim() }).catch(() => {})
       onStarted(await api.startRun(config))
+    } catch (e) {
+      setFlowError((e as Error).message)
     } finally {
       setBusy(false)
     }
@@ -153,8 +182,10 @@ export default function NewRun({
             </p>
           )}
           <div>
-            <label className="mb-1 block text-[12px] text-zinc-400">Ignore pages</label>
+            <label htmlFor="ignore-pages" className="mb-1 block text-[12px] text-zinc-400">Ignore pages</label>
             <textarea
+              id="ignore-pages"
+              aria-describedby="ignore-pages-hint"
               value={ignorePages}
               onChange={(e) => setIgnorePages(e.target.value)}
               rows={2}
@@ -162,7 +193,7 @@ export default function NewRun({
               placeholder={'/login\n/settings/*\n/admin'}
               className="w-full rounded-xl border border-zinc-800 bg-zinc-950/80 px-3 py-2 font-mono text-[12px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-zinc-500 focus:bg-zinc-950"
             />
-            <p className="mt-1 text-[11px] leading-snug text-zinc-600">
+            <p id="ignore-pages-hint" className="mt-1 text-[11px] leading-snug text-zinc-600">
               Paths or URLs to skip (one per line or comma-separated). Prefixes match children;{' '}
               <code className="text-zinc-500">*</code> is a wildcard. The start URL is always captured.
             </p>
@@ -178,8 +209,10 @@ export default function NewRun({
             placeholder="Product context — e.g. “B2B analytics SaaS, technical buyers, dark UI”"
           />
           <div className="flex items-center gap-3">
-            <label className="w-12 shrink-0 text-[12px] text-zinc-400">Pages</label>
+            <label htmlFor="pages-range" className="w-12 shrink-0 text-[12px] text-zinc-400">Pages</label>
             <input
+              id="pages-range"
+              aria-label="Max pages to crawl"
               type="range"
               min={1}
               max={60}
@@ -261,6 +294,13 @@ export default function NewRun({
           icon={<BrandLogo id="chrome" size={14} title="Chrome / Lighthouse" />}
           hint="Perf, accessibility, best-practices and SEO via a separate Chrome pass — slowest independent tool"
         />
+        <Toggle
+          checked={diffMode === 'changed-only'}
+          onChange={(v) => setDiffMode(v ? 'changed-only' : 'full')}
+          label="Diff vs last run"
+          icon={<span className="text-[11px] font-mono text-zinc-400">Δ</span>}
+          hint="Only deep-audit pages that changed since the last done run in this project (faster re-audits)"
+        />
       </div>
 
       <Panel
@@ -297,15 +337,16 @@ export default function NewRun({
             )}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="mb-1 block text-[12px] text-zinc-400">Email / username</label>
-                <Input value={email} onChange={setEmail} placeholder="you@company.com" />
+                <label htmlFor="auth-email" className="mb-1 block text-[12px] text-zinc-400">Email / username</label>
+                <Input value={email} onChange={setEmail} placeholder="you@company.com" id="auth-email" />
               </div>
               <div>
-                <label className="mb-1 block text-[12px] text-zinc-400">
+                <label htmlFor="auth-password" className="mb-1 block text-[12px] text-zinc-400">
                   Password{' '}
                   {matchedCred && <span className="text-zinc-600">— blank uses the saved one</span>}
                 </label>
                 <Input
+                  id="auth-password"
                   type="password"
                   value={password}
                   onChange={setPassword}
@@ -333,10 +374,10 @@ export default function NewRun({
               </button>
             )}
             <div>
-              <label className="mb-1 block text-[12px] text-zinc-400">
+              <label htmlFor="auth-login-url" className="mb-1 block text-[12px] text-zinc-400">
                 Login page <span className="text-zinc-600">optional — /login, /signin, /auth/login are tried automatically</span>
               </label>
-              <Input value={loginUrl} onChange={setLoginUrl} placeholder="https://app.example.com/login" />
+              <Input id="auth-login-url" value={loginUrl} onChange={setLoginUrl} placeholder="https://app.example.com/login" />
             </div>
             <details className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-2.5">
               <summary className="cursor-pointer text-[12px] text-zinc-400">
@@ -363,8 +404,10 @@ export default function NewRun({
         right={<span className="text-[11px] text-zinc-600">leave empty to let Gemini propose them</span>}
       >
         <textarea
+          id="flow-text"
+          aria-describedby="flow-hint"
           value={flowText}
-          onChange={(e) => setFlowText(e.target.value)}
+          onChange={(e) => { setFlowText(e.target.value); if (flowError) setFlowError(null) }}
           rows={7}
           spellCheck={false}
           placeholder={`Signup
@@ -375,9 +418,11 @@ click role=button:Continue
 assertText Check your inbox`}
           className="w-full rounded-lg border border-zinc-800 bg-zinc-950 p-3 font-mono text-[12px] text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-zinc-600"
         />
-        <p className="mt-2 text-[11px] leading-snug text-zinc-600">
+        {flowError && <p className="mt-1 text-[11px] text-red-400" role="alert">{flowError}</p>}
+        <p id="flow-hint" className="mt-2 text-[11px] leading-snug text-zinc-600">
           One flow per block: first line is the name, then <code>action target | value</code>. Targets accept{' '}
           <code>text=</code>, <code>role=button:Name</code>, <code>label=</code>, <code>placeholder=</code> or CSS.
+          Allowed actions: <code>goto</code>, <code>click</code>, <code>fill</code>, <code>press</code>, <code>wait</code>, <code>assertText</code>, <code>scroll</code>.
         </p>
       </Panel>
 
@@ -408,23 +453,36 @@ assertText Check your inbox`}
   )
 }
 
-function parseFlows(text: string): { name: string; steps: FlowStep[] }[] {
+const VALID_ACTIONS = new Set(['goto', 'click', 'fill', 'press', 'wait', 'assertText', 'scroll'])
+function parseFlows(text: string): { flows: { name: string; steps: FlowStep[] }[]; error: string | null } {
+  if (!text.trim()) return { flows: [], error: null }
   const blocks = text
     .split(/\n\s*\n/)
     .map((b) => b.trim())
     .filter(Boolean)
-  return blocks.map((block) => {
+  const flows: { name: string; steps: FlowStep[] }[] = []
+  for (const block of blocks) {
     const [name, ...rest] = block.split('\n')
+    if (!name?.trim()) return { flows: [], error: 'Flow block missing name (first line)' }
     const steps: FlowStep[] = []
     for (const line of rest) {
+      if (!line.trim()) continue
       const [head, value] = line.split('|').map((s) => s.trim())
       const [action, ...targetParts] = head.split(/\s+/)
+      if (!action) continue
+      if (!VALID_ACTIONS.has(action)) {
+        return { flows: [], error: `Invalid action "${action}" in flow "${name.trim()}" — allowed: ${[...VALID_ACTIONS].join(', ')}` }
+      }
+      if ((action === 'click' || action === 'fill') && !targetParts.join(' ').trim()) {
+        return { flows: [], error: `"${action}" step in flow "${name.trim()}" requires a target` }
+      }
       steps.push({
         action: action as FlowStep['action'],
         target: targetParts.join(' ') || undefined,
         value
       })
     }
-    return { name: name.trim(), steps }
-  })
+    flows.push({ name: name.trim(), steps })
+  }
+  return { flows, error: null }
 }

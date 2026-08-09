@@ -62,6 +62,8 @@ export interface Finding {
   delta?: FindingDelta
   /** Pages this finding was observed on (after dedupe). */
   affectedPages?: number
+  /** axe tags passthrough for filtering (wcag2a, wcag2aa, best-practice, cat.*) */
+  tags?: string[]
 }
 
 export type BuildMode = 'development' | 'production' | 'unknown'
@@ -215,6 +217,10 @@ export interface AxeViolation {
   help: string
   helpUrl: string
   nodes: { target: string[]; failureSummary: string }[]
+  /** axe tags: wcag2a, wcag2aa, best-practice, cat.*, act, section508 */
+  tags?: string[]
+  /** True for axe incomplete (needs review) vs violations */
+  incomplete?: boolean
 }
 
 export interface PageMetrics {
@@ -222,7 +228,13 @@ export interface PageMetrics {
   domContentLoadedMs: number
   loadMs: number
   lcpMs: number | null
+  /** First Contentful Paint (ms) */
+  fcpMs: number | null
   cls: number | null
+  /** Total Blocking Time (ms) Lab approximation */
+  tbtMs: number | null
+  /** Interaction to Next Paint (ms) when available */
+  inpMs?: number | null
   transferBytes: number
   requestCount: number
   longTaskMs: number
@@ -238,6 +250,8 @@ export interface CapturedPage {
   sections: PageSection[]
   tokens: DesignTokens
   axe: AxeViolation[]
+  /** axe incomplete = needs review (not counted as violation but triaged). */
+  axeIncomplete?: AxeViolation[]
   /** Authored-CSS metrics (Project Wallace); null when no CSS could be read. */
   cssStats: CssStats | null
   /** Style Dictionary token tree extracted from authored CSS custom properties. */
@@ -262,6 +276,8 @@ export interface CapturedPage {
     overlaps: number
   }[]
   links: string[]
+  /** Stable hash of the page's HTML (sha256, hex slice) for incremental diff. */
+  htmlHash?: string
 }
 
 export interface FlowStep {
@@ -498,10 +514,52 @@ export interface RunConfig {
   productContext: string
   flows: { name: string; steps: FlowStep[] }[]
   auth?: AuthConfig
+  /** Project grouping — assigned by main from targetUrl origin. */
+  projectId?: string
+  /** Diff mode: only deep-audit pages that changed vs baseline. */
+  diffMode?: 'full' | 'changed-only'
+  /** Explicit baseline for diff mode; defaults to latest done run for project. */
+  baselineRunId?: string
+  /** Locale-aware budgets (LHCI/sitespeed-style): minScore / maxFindings per severity + per-metric. */
+  budgets?: {
+    minScore?: number
+    maxFindings?: Partial<Record<Severity, number>>
+    /** Per-metric thresholds: fail gate when violated */
+    metrics?: {
+      maxLcpMs?: number
+      maxCls?: number
+      maxTbtMs?: number
+      maxFcpMs?: number
+      maxTransferBytes?: number
+      minLighthousePerformance?: number
+      minLighthouseAccessibility?: number
+      minLighthouseBestPractices?: number
+      minLighthouseSeo?: number
+    }
+    /** Per-category minimum scores (0-100) */
+    perCategory?: Partial<Record<Category, number>>
+  }
+  /** When true, skip sitemap discovery and use BFS only. */
+  disableSitemap?: boolean
+}
+
+export interface Project {
+  id: string
+  slug: string
+  name: string
+  origin: string
+  targetUrl: string
+  createdAt: number
+  updatedAt: number
+  runCount: number
+  lastRunId?: string
+  lastRunAt?: number
 }
 
 export interface Run {
   id: string
+  projectId?: string
+  baselineRunId?: string
   createdAt: number
   finishedAt?: number
   status: RunStatus
@@ -534,6 +592,20 @@ export interface Run {
   }
   /** Why Lighthouse is missing or partial (soft-fail / skipped SEO for apps). */
   lighthouseNote?: string
+  /** Incremental diff summary when diffMode === 'changed-only'. */
+  diffSummary?: {
+    baselineRunId: string
+    totalPages: number
+    changedPages: number
+    unchangedPages: number
+    newPages: number
+    removedPages: number
+    reusedFromBaseline: number
+  }
+  /** Baseline approval: only approved runs become eligible baselines (auto-approve by default). */
+  approved?: boolean
+  /** Git context for branch-aware baseline picking (LHCI/Argos parity). */
+  git?: { branch?: string; sha?: string; baseSha?: string; baseBranch?: string }
   error?: string
   log: { ts: number; level: 'info' | 'warn' | 'error'; msg: string }[]
 }

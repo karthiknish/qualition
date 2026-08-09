@@ -60,12 +60,23 @@ function scopeNote(attr: CssStats['attribution'] | undefined): string {
   return ` First-party CSS was too thin to score alone — metrics include framework/vendor sheets (${(attr.totalBytes / 1024).toFixed(0)} kB total).`
 }
 
+const cssCache = new Map<string, CssStats | null>()
+function hashCss(css: string): string {
+  let h = 0
+  for (let i = 0; i < css.length; i++) h = (Math.imul(31, h) + css.charCodeAt(i)) | 0
+  return `${css.length}:${h}:${css.slice(0, 64)}`
+}
+
 export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions = {}): CssStats | null {
   if (!css || css.length < 40) return null
-  let a: any
+  const cacheKey = `${hashCss(css)}:${sheets}:${opts.attribution ? `${opts.attribution.appBytes}:${opts.attribution.totalBytes}` : '0'}`
+  if (cssCache.has(cacheKey)) return cssCache.get(cacheKey) ?? null
+  let a: unknown
   try {
     a = analyze(css)
   } catch {
+    cssCache.set(cacheKey, null)
+    if (cssCache.size > 50) cssCache.delete(cssCache.keys().next().value!)
     return null
   }
   let quality = { performance: 100, maintainability: 100, complexity: 100 }
@@ -86,43 +97,66 @@ export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions 
     /* quality scoring is optional */
   }
 
-  const custom = a.properties?.custom ?? {}
-  const zi = a.values?.zindexes ?? {}
+  const av = a as {
+    stylesheet?: { size?: number }
+    rules?: { total?: number }
+    selectors?: { total?: number; specificity?: { max?: unknown[] }; id?: { ratio?: number }; browserhacks?: { total?: number } }
+    declarations?: { importants?: { ratio?: number } }
+    values?: {
+      colors?: { total?: number; totalUnique?: number; uniquenessRatio?: number }
+      fontSizes?: { totalUnique?: number }
+      fontFamilies?: { totalUnique?: number }
+      borderRadiuses?: { totalUnique?: number }
+      boxShadows?: { totalUnique?: number }
+      zindexes?: { totalUnique?: number; unique?: Record<string, unknown> }
+      browserhacks?: { total?: number }
+      prefixes?: { total?: number }
+    }
+    properties?: { custom?: { total?: number; unused?: unknown[] }; prefixed?: { total?: number } }
+    atrules?: { media?: { total?: number } }
+  }
+  const custom = av.properties?.custom ?? {}
+  const zi = av.values?.zindexes ?? {}
   const zValues = Object.keys(zi.unique ?? {})
     .map((z) => parseInt(z, 10))
     .filter((n) => Number.isFinite(n))
 
   const attr = opts.attribution
-  const bytes = attr?.totalBytes ?? num(a.stylesheet?.size)
+  const rawBytes = num(av.stylesheet?.size)
+  const trueBytes = css ? Buffer.byteLength(css, 'utf8') : rawBytes
+  const bytes = attr?.totalBytes ?? trueBytes
   const sheetTotal = attr ? attr.appSheets + attr.frameworkSheets + attr.vendorSheets : sheets
 
-  return {
+  const result: CssStats = {
     bytes,
     sheets: sheetTotal || sheets,
-    rules: num(a.rules?.total),
-    selectors: num(a.selectors?.total),
-    maxSpecificity: (a.selectors?.specificity?.max ?? []).join(','),
-    importantRatio: num(a.declarations?.importants?.ratio),
-    idSelectorRatio: num(a.selectors?.id?.ratio),
-    colorsTotal: num(a.values?.colors?.total),
-    colorsUnique: num(a.values?.colors?.totalUnique),
-    colorUniquenessRatio: num(a.values?.colors?.uniquenessRatio),
-    fontSizesUnique: num(a.values?.fontSizes?.totalUnique),
-    fontFamiliesUnique: num(a.values?.fontFamilies?.totalUnique),
-    radiiUnique: num(a.values?.borderRadiuses?.totalUnique),
-    shadowsUnique: num(a.values?.boxShadows?.totalUnique),
+    rules: num(av.rules?.total),
+    selectors: num(av.selectors?.total),
+    maxSpecificity: (av.selectors?.specificity?.max ?? []).join(','),
+    importantRatio: num(av.declarations?.importants?.ratio),
+    idSelectorRatio: num(av.selectors?.id?.ratio),
+    colorsTotal: num(av.values?.colors?.total),
+    colorsUnique: num(av.values?.colors?.totalUnique),
+    colorUniquenessRatio: num(av.values?.colors?.uniquenessRatio),
+    fontSizesUnique: num(av.values?.fontSizes?.totalUnique),
+    fontFamiliesUnique: num(av.values?.fontFamilies?.totalUnique),
+    radiiUnique: num(av.values?.borderRadiuses?.totalUnique),
+    shadowsUnique: num(av.values?.boxShadows?.totalUnique),
     zIndexUnique: num(zi.totalUnique),
     zIndexMax: zValues.length ? Math.max(...zValues) : 0,
-    browserhacks: num(a.values?.browserhacks?.total) + num(a.selectors?.browserhacks?.total),
-    vendorPrefixed: num(a.values?.prefixes?.total) + num(a.properties?.prefixed?.total),
+    browserhacks: num(av.values?.browserhacks?.total) + num(av.selectors?.browserhacks?.total),
+    vendorPrefixed: num(av.values?.prefixes?.total) + num(av.properties?.prefixed?.total),
     customPropsDefined: num(custom.total),
     customPropsUnused: Array.isArray(custom.unused) ? custom.unused.length : 0,
-    mediaQueries: num(a.atrules?.media?.total),
+    mediaQueries: num(av.atrules?.media?.total),
     quality,
     qualityViolations,
     locations: locateCssIssues(css),
     attribution: attr
   }
+  cssCache.set(cacheKey, result)
+  if (cssCache.size > 50) cssCache.delete(cssCache.keys().next().value!)
+  return result
 }
 
 /** Turn CSS stats into the same Finding shape as everything else. */
@@ -276,6 +310,22 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
         'Drop obsolete -webkit/-moz/-ms prefixes; keep only what caniuse still requires.'
       )
     )
+  }
+  // Expanded Wallace surface: more debt signals previously unreported
+  if (stats.rules > 1500 && stats.selectors / Math.max(1, stats.rules) > 2.5) {
+    out.push(mk(page, 'coherence', 'minor', `High selector density ${(stats.selectors / stats.rules).toFixed(1)} selectors/rule`, `${stats.selectors} selectors across ${stats.rules} rules suggests over-qualified lists.${note}`, 'Flatten selector lists — one class per concern.'))
+  }
+  if (stats.selectors > 2000) {
+    out.push(mk(page, 'performance', 'minor', `${stats.selectors} selectors in authored CSS`, `Large selector counts increase style recalc cost.${note}`, 'Purge unused selectors and split route CSS.'))
+  }
+  if (stats.mediaQueries > 24) {
+    out.push(mk(page, 'responsive', 'minor', `${stats.mediaQueries} media queries authored`, `Many breakpoints suggest breakpoint sprawl rather than a system.${note}`, 'Consolidate to 3-4 named breakpoints (sm/md/lg/xl).'))
+  } else if (stats.mediaQueries === 0 && stats.rules > 200) {
+    out.push(mk(page, 'responsive', 'nit', `No media queries in ${stats.rules} rules`, `No responsive authored rules detected — may be desktop-only.${note}`, 'Add responsive variants or confirm mobile is handled via container queries.'))
+  }
+  if (stats.colorsTotal > 0 && stats.colorsUnique / Math.max(1, stats.colorsTotal) < 0.15 && stats.colorsTotal > 100) {
+    // inverse of uniqueness: very low uniqueness not flagged earlier
+    out.push(mk(page, 'coherence', 'nit', `Colour declarations highly repetitive`, `${stats.colorsTotal} declarations but only ${stats.colorsUnique} unique — check if palette is over-constrained.${note}`, 'Ensure palette tokens cover semantic roles.'))
   }
 
   const totalBytes = attr?.totalBytes ?? stats.bytes

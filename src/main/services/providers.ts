@@ -89,12 +89,18 @@ export interface ProviderCredentials {
 async function imageToBase64(path: string): Promise<{ data: string; mime: string } | null> {
   try {
     const buf = await readFile(path)
-    if (buf.byteLength > 6_000_000) return null
-    const mime = path.endsWith('.webp')
+    if (buf.byteLength > 6_000_000) {
+      console.warn(`[providers] image ${path} exceeds 6MB (${buf.byteLength} bytes) — skipping vision for this screenshot`)
+      return null
+    }
+    const lower = path.toLowerCase()
+    const mime = lower.endsWith('.webp')
       ? 'image/webp'
-      : path.endsWith('.jpg') || path.endsWith('.jpeg')
+      : lower.endsWith('.jpg') || lower.endsWith('.jpeg')
         ? 'image/jpeg'
-        : 'image/png'
+        : lower.endsWith('.avif')
+          ? 'image/avif'
+          : 'image/png'
     return { data: buf.toString('base64'), mime }
   } catch {
     return null
@@ -150,15 +156,22 @@ export async function withBackoff<T>(label: string, fn: () => Promise<T>, attemp
     } catch (e) {
       lastError = e
       const msg = (e as Error).message ?? ''
+      // Only retry 5xx/transient, not 4xx schema/auth errors
+      const statusMatch = /(?:^|\s)(4\d\d)\b/.exec(msg)
+      const is4xx = !!statusMatch
       const retryable =
-        /429|RESOURCE_EXHAUSTED|rate.?limit|503|UNAVAILABLE|500|INTERNAL|overloaded|fetch failed|ECONN|ETIMEDOUT|timed out|timeout/i.test(msg)
+        !is4xx &&
+        /429|RESOURCE_EXHAUSTED|rate.?limit|503|UNAVAILABLE|500|502|503|504|INTERNAL|overloaded|fetch failed|ECONN|ETIMEDOUT|timed out|timeout/i.test(
+          msg
+        )
       if (!retryable || i === attempts - 1) break
       const hinted = /retry(?:Delay|-after)"?[:\s]+"?(\d+)/i.exec(msg)?.[1]
       const waitMs = hinted ? Number(hinted) * 1000 : 1500 * 2 ** i + Math.random() * 700
       await new Promise((r) => setTimeout(r, Math.min(waitMs, 45_000)))
     }
   }
-  throw new Error(`${label}: ${(lastError as Error)?.message ?? 'unknown error'}`)
+  const cause = lastError instanceof Error ? lastError : new Error(String(lastError))
+  throw new Error(`${label}: ${cause.message}`, { cause })
 }
 
 /* --------------------------------- gemini --------------------------------- */
@@ -369,8 +382,7 @@ class OpenAiProvider implements Provider {
         fetch(`${this.base()}/responses`, {
           method: 'POST',
           headers: this.headers(),
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          body: JSON.stringify(body)
         }),
         REQUEST_TIMEOUT_MS,
         'openai request'
@@ -624,8 +636,7 @@ class OpenRouterProvider implements Provider {
         fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: this.headers(),
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+          body: JSON.stringify(body)
         }),
         REQUEST_TIMEOUT_MS,
         'openrouter request'
@@ -671,11 +682,11 @@ export function credsFromSettings(s: {
   openrouterApiKey?: string
 }): ProviderCredentials {
   return {
-    geminiApiKey: s.geminiApiKey || process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
-    openaiApiKey: s.openaiApiKey || process.env.OPENAI_API_KEY,
-    openaiBaseUrl: s.openaiBaseUrl || process.env.OPENAI_BASE_URL,
+    geminiApiKey: s.geminiApiKey ?? process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY ?? '',
+    openaiApiKey: s.openaiApiKey ?? process.env.OPENAI_API_KEY ?? '',
+    openaiBaseUrl: s.openaiBaseUrl ?? process.env.OPENAI_BASE_URL ?? '',
     cursorBinary: s.cursorBinary,
-    cursorApiKey: s.cursorApiKey || process.env.CURSOR_API_KEY,
-    openrouterApiKey: s.openrouterApiKey || process.env.OPENROUTER_API_KEY
+    cursorApiKey: s.cursorApiKey ?? process.env.CURSOR_API_KEY ?? '',
+    openrouterApiKey: s.openrouterApiKey ?? process.env.OPENROUTER_API_KEY ?? ''
   }
 }

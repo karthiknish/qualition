@@ -1,0 +1,9 @@
+{
+  "disableCategories": [],
+  "ignoreTitles": ["purple palette as primary"],
+  "thresholds": { "visualDiffThreshold": 0.02 },
+  "visual": { "diffThreshold": 0.02, "ignoreSelectors": [".chromatic-ignore", "[data-qualition-ignore]"] },
+  "baseline": { "referenceBranch": "main" },
+  "approvals": { "autoApprove": true, "autoApproveBranches": ["main"] },
+  "budgets": { "minScore": 60, "maxFindings": { "blocker": 0, "critical": 2 } }
+}

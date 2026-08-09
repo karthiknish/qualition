@@ -23,6 +23,9 @@ import { auditBrokenUi } from './brokenUi.js'
 import { auditPremiumCraft } from './premiumCraft.js'
 
 let counter = 0
+export function resetAuditCounter(): void {
+  counter = 0
+}
 function mk(
   page: CapturedPage,
   category: Category,
@@ -33,7 +36,7 @@ function mk(
   extra: Partial<Finding> = {}
 ): Finding {
   return {
-    id: `f${++counter}`,
+    id: `f${++counter}-${page.url.replace(/[^a-z0-9]/gi, '_').slice(0, 16)}`,
     category,
     severity,
     title,
@@ -81,7 +84,7 @@ export function deltaE(a: string, b: string): number | null {
 
 export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   const out: Finding[] = []
-  const signals: any = (page as any).signals ?? {}
+  const signals = (page.signals ?? {}) as Record<string, unknown>
   const strict = config.brutality === 'ruthless' ? 1 : config.brutality === 'harsh' ? 0.75 : 0.5
   const t = page.tokens
 
@@ -520,6 +523,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
       .slice(0, 3)
       .map((n) => n.target.join(' '))
       .join(' | ')}`
+    if (v.tags?.length) detail += `\nTags: ${v.tags.join(', ')}`
     if (/contrast/i.test(v.id) || /contrast/i.test(v.help)) {
       detail +=
         '\nCompositing: if the reported colours look wrong vs design tokens, check ancestor opacity — e.g. opacity:0.72 on a row composites the token down to the measured pair.'
@@ -535,28 +539,55 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
       selector,
       source: 'axe',
       provenance: prov,
+      tags: v.tags,
       effort: /contrast|name|label|lang|alt/i.test(v.id) ? 'one-line' : 'component'
     })
   }
-  if (signals.imagesMissingAlt > 0) {
+  // axe incomplete = needs manual review (not a violation, but triaged separately)
+  for (const v of page.axeIncomplete ?? []) {
+    if (axeSeen.has(`inc:${v.id}`)) continue
+    axeSeen.add(`inc:${v.id}`)
+    const selector = v.nodes[0]?.target?.join(' ')
+    let detail = `${v.nodes.length} node(s) needs review. ${v.nodes[0]?.failureSummary ?? ''} Targets: ${v.nodes
+      .slice(0, 2)
+      .map((n) => n.target.join(' '))
+      .join(' | ')}`
+    if (v.tags?.length) detail += `\nTags: ${v.tags.join(', ')}`
+    out.push({
+      id: `f${++counter}`,
+      category: 'accessibility',
+      severity: 'minor',
+      title: `needs review: ${v.help}`,
+      detail,
+      fix: `Manual check required per axe incomplete: ${v.helpUrl}`,
+      pageUrl: page.url,
+      selector,
+      source: 'axe',
+      provenance: provenanceForSelector(selector),
+      tags: v.tags,
+      effort: 'one-line',
+      confidence: 'low'
+    })
+  }
+  if ((signals.imagesMissingAlt as number) > 0) {
     out.push(
-      mk(page, 'accessibility', signals.imagesMissingAlt > 5 ? 'major' : 'minor',
-        `${signals.imagesMissingAlt} images without alt text`,
-        `Screen-reader users get filenames or silence.${signals.imagesDecorativeOk ? ` (${signals.imagesDecorativeOk} correctly marked decorative with alt="" — not counted.)` : ''}`,
+      mk(page, 'accessibility', (signals.imagesMissingAlt as number) > 5 ? 'major' : 'minor',
+        `${signals.imagesMissingAlt as number} images without alt text`,
+        `Screen-reader users get filenames or silence.${signals.imagesDecorativeOk ? ` (${signals.imagesDecorativeOk as number} correctly marked decorative with alt="" — not counted.)` : ''}`,
         'Add descriptive alt, or alt="" for decoration (empty alt is correct for decorative images).',
         { effort: 'one-line' })
     )
   }
-  if (signals.h1Count === 0) {
+  if ((signals.h1Count as number) === 0) {
     out.push(mk(page, 'accessibility', 'major', 'No <h1> on the page', 'Document outline has no root heading.', 'Exactly one <h1> that states the page proposition.'))
-  } else if (signals.h1Count > 1) {
-    out.push(mk(page, 'accessibility', 'minor', `${signals.h1Count} <h1> elements`, 'Multiple document titles confuse assistive tech and SEO.', 'Demote all but the primary to <h2>.'))
+  } else if ((signals.h1Count as number) > 1) {
+    out.push(mk(page, 'accessibility', 'minor', `${signals.h1Count as number} <h1> elements`, 'Multiple document titles confuse assistive tech and SEO.', 'Demote all but the primary to <h2>.'))
   }
-  if (signals.headingOrderIssues > 0) {
-    out.push(mk(page, 'accessibility', 'minor', `${signals.headingOrderIssues} heading-level skips`, 'Levels jump (e.g. h2 → h4), breaking the outline.', 'Never skip levels; style with classes, not tag choice.'))
+  if ((signals.headingOrderIssues as number) > 0) {
+    out.push(mk(page, 'accessibility', 'minor', `${signals.headingOrderIssues as number} heading-level skips`, 'Levels jump (e.g. h2 → h4), breaking the outline.', 'Never skip levels; style with classes, not tag choice.'))
   }
-  if (signals.buttonsWithoutLabel > 0) {
-    out.push(mk(page, 'accessibility', 'major', `${signals.buttonsWithoutLabel} icon-only buttons without a label`, 'Buttons with no text and no aria-label are unusable non-visually.', 'Add aria-label, or a visually hidden span.', { effort: 'one-line' }))
+  if ((signals.buttonsWithoutLabel as number) > 0) {
+    out.push(mk(page, 'accessibility', 'major', `${(signals.buttonsWithoutLabel as number)} icon-only buttons without a label`, 'Buttons with no text and no aria-label are unusable non-visually.', 'Add aria-label, or a visually hidden span.', { effort: 'one-line' }))
   }
   if (!signals.hasSkipLink && strict > 0.7) {
     out.push(mk(page, 'accessibility', 'nit', 'No skip-to-content link', 'Keyboard users must tab through the whole nav on every page.', 'Add a focus-visible skip link as the first focusable element.'))
@@ -630,23 +661,74 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   }
 
   /* ---- performance ---- */
+  // Lighthouse log-normal curves (mirrors Lighthouse scoring): curve maps value -> 0..1
+  const logNormalScore = (value: number, median: number, p10: number): number => {
+    // Lighthouse uses log-normal with pODM; approximate via erf for median/p10
+    // Fallback to linear interpolation if math fails
+    try {
+      const logM = Math.log(median)
+      const logP10 = Math.log(p10)
+      // sigma from p10 = median * exp(sigma * -1.2816)
+      const sigma = (logM - logP10) / 1.2816
+      const z = (Math.log(value) - logM) / (sigma * Math.SQRT2)
+      // erf approximation
+      const erf = (x: number): number => {
+        const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911
+        const sign = x < 0 ? -1 : 1
+        const abs = Math.abs(x)
+        const t = 1 / (1 + p * abs)
+        const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-abs * abs)
+        return sign * y
+      }
+      return Math.max(0, Math.min(1, 0.5 * (1 - erf(z))))
+    } catch { return value <= median ? 1 : value <= p10 ? 0.9 : 0.5 }
+  }
   const m = page.metrics
   const devBuild = page.captureContext?.buildMode === 'development'
   const softPerf = (severity: Severity): Severity => (devBuild ? 'nit' : severity)
   const perfSuffix = devBuild
     ? ' [dev-server artifact — not actionable; re-audit a production build]'
     : ''
-  if (m.lcpMs && m.lcpMs > 2500) {
-    out.push(mk(page, 'performance', softPerf(m.lcpMs > 4000 ? 'critical' : 'major'), `LCP ${(m.lcpMs / 1000).toFixed(1)}s${devBuild ? ' (dev)' : ''}`, `Largest Contentful Paint above the 2.5s "good" threshold.${perfSuffix}`, 'Preload the hero asset, serve modern formats, and cut render-blocking JS.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+  // LCP: median 2500 good, p10 4000 poor (Lighthouse desktop)
+  if (m.lcpMs != null && m.lcpMs > 0) {
+    const s = logNormalScore(m.lcpMs, 2500, 4000)
+    if (s < 0.9 || m.lcpMs > 2500) {
+      // Keep historic bands for test parity: >4000 critical, >2500 major, blended score shown
+      const sev: Severity = m.lcpMs > 4000 ? 'critical' : m.lcpMs > 2500 ? 'major' : s < 0.9 ? 'minor' as Severity : 'nit'
+      if (m.lcpMs > 2500) out.push(mk(page, 'performance', softPerf(sev), `LCP ${(m.lcpMs / 1000).toFixed(1)}s${devBuild ? ' (dev)' : ''} (score ${(s*100)|0})`, `Largest Contentful Paint above the 2.5s "good" threshold (log-normal score ${(s*100)|0}).${perfSuffix}`, 'Preload the hero asset, serve modern formats, and cut render-blocking JS.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+    }
   }
-  if (m.cls !== null && m.cls > 0.1) {
-    out.push(mk(page, 'performance', softPerf(m.cls > 0.25 ? 'critical' : 'major'), `CLS ${m.cls.toFixed(3)}${devBuild ? ' (dev)' : ''}`, `Layout shifts above 0.1 — content moves under the user.${perfSuffix}`, 'Reserve space for images/embeds and avoid late-injected banners.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+  // FCP: median 1800, p10 3000
+  if ((m as any).fcpMs != null && (m as any).fcpMs > 0) {
+    const fcp = (m as any).fcpMs as number
+    const s = logNormalScore(fcp, 1800, 3000)
+    if (s < 0.9) {
+      const sev: Severity = s < 0.5 ? 'major' : 'minor'
+      out.push(mk(page, 'performance', softPerf(sev), `FCP ${(fcp/1000).toFixed(1)}s${devBuild ? ' (dev)' : ''}`, `First Contentful Paint ${(s*100)|0}/100.${perfSuffix}`, 'Inline critical CSS, reduce render-blocking resources.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+    }
+  }
+  // CLS: median 0.1, p10 0.25
+  if (m.cls !== null && m.cls > 0.01) {
+    // CLS is not log-normal in LH; use linear buckets but keep curve
+    const clsSc = m.cls <= 0.1 ? 1 : m.cls <= 0.25 ? 0.5 : 0
+    if (clsSc < 1) {
+      const sev = m.cls > 0.25 ? 'critical' : m.cls > 0.1 ? 'major' : 'nit'
+      out.push(mk(page, 'performance', softPerf(sev as Severity), `CLS ${m.cls.toFixed(3)}${devBuild ? ' (dev)' : ''}`, `Layout shifts above 0.1 — content moves under the user (score ${(clsSc*100)|0}).${perfSuffix}`, 'Reserve space for images/embeds and avoid late-injected banners.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+    }
+  }
+  // TBT: median 200ms, p10 600ms
+  if ((m as any).tbtMs != null && (m as any).tbtMs > 0) {
+    const tbt = (m as any).tbtMs as number
+    const s = logNormalScore(tbt, 200, 600)
+    if (s < 0.9) {
+      const sev: Severity = s < 0.3 ? 'major' : 'minor'
+      out.push(mk(page, 'performance', softPerf(sev), `TBT ${tbt}ms${devBuild ? ' (dev)' : ''}`, `Total Blocking Time ${(s*100)|0}/100.${perfSuffix}`, 'Split bundles, defer non-critical work, reduce JS execution.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+    }
+  } else if (m.longTaskMs > 800) {
+    out.push(mk(page, 'performance', softPerf('minor'), `${m.longTaskMs}ms of long tasks${devBuild ? ' (dev)' : ''}`, `The main thread is blocked, so early clicks feel dead.${perfSuffix}`, 'Split bundles, defer non-critical work, hydrate progressively.', { confidence: devBuild ? 'low' : 'high' }))
   }
   if (m.transferBytes > 3_500_000) {
     out.push(mk(page, 'performance', softPerf('major'), `${(m.transferBytes / 1e6).toFixed(1)} MB transferred${devBuild ? ' (dev)' : ''}`, `${m.requestCount} requests.${perfSuffix}`, 'Compress and lazy-load below-the-fold media; audit the JS bundle.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
-  }
-  if (m.longTaskMs > 800) {
-    out.push(mk(page, 'performance', softPerf('minor'), `${m.longTaskMs}ms of long tasks${devBuild ? ' (dev)' : ''}`, `The main thread is blocked, so early clicks feel dead.${perfSuffix}`, 'Split bundles, defer non-critical work, hydrate progressively.', { confidence: devBuild ? 'low' : 'high' }))
   }
   if (devBuild && (m.lcpMs || m.transferBytes > 500_000)) {
     out.push(
@@ -666,8 +748,8 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   if (!signals.metaDescription) {
     out.push(mk(page, 'content', 'nit', 'No meta description', 'Search and link previews get scraped junk.', 'Write a 150-character description per page.'))
   }
-  if (signals.title && signals.title.length > 65) {
-    out.push(mk(page, 'content', 'nit', 'Page title over 65 characters', signals.title, 'Trim to fit the SERP truncation limit.'))
+  if (signals.title && String(signals.title).length > 65) {
+    out.push(mk(page, 'content', 'nit', 'Page title over 65 characters', String(signals.title), 'Trim to fit the SERP truncation limit.'))
   }
   const heroSection = page.sections.find((s) => s.role === 'hero')
   if (heroSection && heroSection.ctaLabels.length === 0) {
@@ -905,47 +987,48 @@ function longestRun(arr: string[]): { role: string; count: number } {
  * the bad end instead of saturating.
  */
 const CATEGORY_BUDGET: Record<Category, number> = {
-  coherence: 180,
-  variety: 90,
-  accessibility: 220,
-  responsive: 130,
-  flow: 170,
-  performance: 120,
-  content: 80,
-  craft: 110
+  coherence: 150,
+  variety: 80,
+  accessibility: 160,
+  responsive: 110,
+  flow: 140,
+  performance: 90,
+  content: 70,
+  craft: 90
 }
 
-export function scoreRun(findings: Finding[], pageCount: number, brutality: RunConfig['brutality']): Scorecard {
+export function scoreRun(findings: Finding[], pageCount: number, brutality: RunConfig['brutality'], lighthouseScores?: { performance?: number | null }): Scorecard {
   const multiplier = brutality === 'ruthless' ? 1.35 : brutality === 'harsh' ? 1.0 : 0.75
   const categories = {} as Scorecard['categories']
   const cats: Category[] = ['coherence', 'variety', 'accessibility', 'responsive', 'flow', 'performance', 'content', 'craft']
-  const effortEase: Record<FindingEffort, number> = { 'one-line': 1.15, component: 1, redesign: 0.75 }
-
+  // Effort no longer shapes the grade (kept only for ordering in sortFindingsForBrief)
   for (const c of cats) {
     const list = findings.filter((f) => f.category === c)
     const penalty =
       list.reduce((s, f) => {
         const reach = Math.min(2, 1 + Math.log10(Math.max(1, f.affectedPages ?? 1)))
-        const ease = effortEase[f.effort ?? guessEffort(f)]
-        // Reach amplifies; hard redesigns weigh less toward the grade so a one-line
-        // AA failure still outranks a mobile IA redesign in “Start here” — severity
-        // stays on the finding; this only shapes score pressure.
-        return s + SEVERITY_WEIGHT[f.severity] * reach * ease
+        return s + SEVERITY_WEIGHT[f.severity] * reach
       }, 0) * multiplier
     const budget = CATEGORY_BUDGET[c] * Math.max(1, pageCount * 0.5)
     const ratio = penalty / budget
-    const score = Math.max(2, Math.round(100 * Math.exp(-ratio)))
+    let score = Math.max(2, Math.round(100 * Math.exp(-ratio)))
+    // Blend Lighthouse performance into performance category when available
+    if (c === 'performance' && lighthouseScores?.performance != null) {
+      const lh = Math.round(lighthouseScores.performance * 100)
+      // 50/50 blend: heuristic score and Lighthouse score
+      score = Math.round(score * 0.5 + lh * 0.5)
+    }
     categories[c] = { score, findings: list.length }
   }
 
   const weights: Record<Category, number> = {
-    coherence: 0.19,
-    accessibility: 0.19,
-    flow: 0.15,
-    responsive: 0.13,
-    variety: 0.08,
-    performance: 0.09,
-    craft: 0.12,
+    coherence: 0.14,
+    accessibility: 0.22,
+    flow: 0.13,
+    responsive: 0.11,
+    variety: 0.07,
+    performance: 0.20,
+    craft: 0.08,
     content: 0.05
   }
   let overall = 0
@@ -1008,26 +1091,27 @@ export function sortFindingsForBrief(findings: Finding[]): Finding[] {
   })
 }
 
+function findingShape(f: Finding): string {
+  let path = f.pageUrl
+  try {
+    path = new URL(f.pageUrl).pathname
+  } catch {}
+  return [f.category, path, f.title.replace(/\d+(\.\d+)?%?/g, '#'), f.selector ?? ''].join('|')
+}
+
 /** Attach new/fixed/regressed vs a prior run's findings. */
 export function diffFindingsAgainstPrior(current: Finding[], prior: Finding[]): Finding[] {
-  const shape = (f: Finding): string =>
-    [f.category, f.title.replace(/\d+(\.\d+)?%?/g, '#'), f.selector ?? ''].join('|')
-  const priorShapes = new Set(prior.map(shape))
-  const currentShapes = new Set(current.map(shape))
+  const priorShapes = new Set(prior.map(findingShape))
   const out = current.map((f) => ({
     ...f,
-    delta: (priorShapes.has(shape(f)) ? 'unchanged' : 'new') as Finding['delta']
+    delta: (priorShapes.has(findingShape(f)) ? 'unchanged' : 'new') as Finding['delta']
   }))
-  // Fixed findings are not in current — caller may surface separately.
-  void currentShapes
   return out
 }
 
 export function fixedFindingsSincePrior(current: Finding[], prior: Finding[]): Finding[] {
-  const shape = (f: Finding): string =>
-    [f.category, f.title.replace(/\d+(\.\d+)?%?/g, '#'), f.selector ?? ''].join('|')
-  const currentShapes = new Set(current.map(shape))
+  const currentShapes = new Set(current.map(findingShape))
   return prior
-    .filter((f) => !currentShapes.has(shape(f)))
+    .filter((f) => !currentShapes.has(findingShape(f)))
     .map((f) => ({ ...f, delta: 'fixed' as const }))
 }

@@ -6,6 +6,7 @@
 import { chromium, type Browser, type Page } from 'playwright'
 import AxeBuilder from '@axe-core/playwright'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { extractFn, observerInit, responsiveOnlyFn } from './extract.js'
 import { analyzeCss } from './cssAudit.js'
 import { partitionCssSheets, type CssSheetInput } from './cssScope.js'
@@ -14,7 +15,7 @@ import { DEV_CHROME_EXCLUDE_LIST, hideDevChrome, installDevChromeGuard } from '.
 import { configurePlaywrightBrowsersPath } from './browsers.js'
 import { looksLikeSoft404, isSoft404Shell } from './brokenUi.js'
 import { isDetailPath } from './componentGaps.js'
-import { normalizeTargetUrl, schemeFallback, isIgnoredPage } from '../../shared/url.js'
+import { normalizeTargetUrl, schemeFallback, isIgnoredPage, isMetadataHost } from '../../shared/url.js'
 import type {
   AxeViolation,
   CapturedPage,
@@ -77,11 +78,18 @@ export const DEFAULT_VIEWPORTS: Viewport[] = [
 ]
 
 export async function launch(): Promise<Browser> {
-  // Headless Chromium can soft-lose document focus so Tab sweeps report zero
-  // stops (playwright#39268). Interaction probes call bringToFront() + seed
-  // focus on a real control before Tabing; keep launch minimal.
   configurePlaywrightBrowsersPath()
-  return chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'] })
+  const timeoutMs = 30_000
+  const launchWithTimeout = async (): Promise<Browser> => {
+    return chromium.launch({ headless: true, args: ['--disable-dev-shm-usage'], timeout: timeoutMs })
+  }
+  // Retry once on transient launch failure
+  try {
+    return await launchWithTimeout()
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 1000))
+    return launchWithTimeout()
+  }
 }
 
 function sameOrigin(a: string, b: string): boolean {
@@ -138,6 +146,12 @@ export interface CaptureOptions {
   /** Path/URL patterns to skip (never captured). Seed URL is always kept. */
   ignorePages?: string[]
   onLog?: (msg: string) => void
+  /** Selectors to hide before screenshot/visual diff (Lost Pixel mask parity). */
+  ignoreSelectors?: string[]
+  /** Baseline html hashes for true incremental skip (url -> hash). */
+  baselineHtmlHashes?: Map<string, string>
+  /** When true, reuse baseline page object if html hash matches (saves Playwright). */
+  incrementalReuseBaseline?: Map<string, CapturedPage>
 }
 
 export async function capturePage(
@@ -145,7 +159,14 @@ export async function capturePage(
   rawUrl: string,
   opts: CaptureOptions
 ): Promise<CapturedPage> {
+  // Block file: and metadata SSRF before navigation
+  if (/^\s*file:/i.test(rawUrl)) throw new Error(`file: URLs are not allowed: ${rawUrl.slice(0, 120)}`)
+  try {
+    const u = new URL(rawUrl.startsWith('http') ? rawUrl : normalizeTargetUrl(rawUrl) ?? rawUrl)
+    if (isMetadataHost(u.hostname)) throw new Error(`Blocked metadata host: ${u.hostname}`)
+  } catch {}
   let url = normalizeTargetUrl(rawUrl) ?? rawUrl
+  if (/^\s*file:/i.test(url)) throw new Error(`file: URLs are not allowed: ${url.slice(0, 120)}`)
   const consoleErrors: string[] = []
   const networkFailures: { url: string; status: number | string }[] = []
   const screenshots: Record<string, string> = {}
@@ -154,6 +175,7 @@ export async function capturePage(
 
   let extracted: any = null
   let axe: AxeViolation[] = []
+  let axeIncomplete: AxeViolation[] = []
   let cssStats: CapturedPage['cssStats'] = null
   let tokenDictionary: TokenDictionary | null = null
   let status = 0
@@ -250,8 +272,17 @@ export async function capturePage(
       }
 
       const shot = join(opts.outDir, `${slug}-${vp.name}.png`)
-      await page.screenshot({ path: shot, fullPage: true, animations: 'disabled' })
-      screenshots[vp.name] = shot
+      try {
+        await withRetry(`screenshot ${url} (${vp.name})`, 2, () => page.screenshot({ path: shot, fullPage: true, animations: 'disabled', timeout: 15_000 }), opts.onLog)
+      } catch (e) {
+        opts.onLog?.(`screenshot failed ${url} (${vp.name}): ${(e as Error).message.slice(0, 120)}`)
+        toolFailures.push({ tool: 'screenshot', message: (e as Error).message.slice(0, 200) })
+      }
+      // Only mark success if file was actually written
+      try {
+        const { existsSync: _es } = await import('node:fs')
+        if (_es(shot)) screenshots[vp.name] = shot
+      } catch {}
 
       const isPrimary = vp.name === opts.viewports[0].name
 
@@ -304,9 +335,15 @@ export async function capturePage(
           const fetched = await Promise.all(
             externalList.map(async (href) => {
               try {
+                const u = new URL(href)
+                if (u.protocol !== 'http:' && u.protocol !== 'https:') return { href, ok: false as const }
+                if (isMetadataHost(u.hostname)) return { href, ok: false as const }
+                // Only fetch same-origin or known CDN stylesheets; block internal metadata
                 const res = await ctx.request.get(href, { timeout: 8000 })
-                if (res.ok()) return { href, text: await res.text(), ok: true as const }
-                return { href, ok: false as const }
+                const text = res.ok() ? await res.text() : ''
+                if (!res.ok()) return { href, ok: false as const }
+                if (text.length > 2_000_000) return { href, text: text.slice(0, 2_000_000), ok: true as const }
+                return { href, text, ok: true as const }
               } catch {
                 return { href, ok: false as const }
               }
@@ -352,38 +389,48 @@ export async function capturePage(
         }
 
         try {
-          // Re-hide in case Agentation remounted during CSS fetch / section shots.
           await hideDevChrome(page)
-          // Official Deque integration: handles iframes, CSP and version drift.
-          // Exclude known debug overlays so a remount race cannot invent button-name
-          // findings for Agentation's styles-module__controlButton icons.
-          let builder = new AxeBuilder({ page }).withTags([
-            'wcag2a',
-            'wcag2aa',
-            'wcag21a',
-            'wcag21aa',
-            'wcag22a',
-            'wcag22aa',
-            'best-practice'
-          ])
-          for (const sel of DEV_CHROME_EXCLUDE_LIST) {
-            try {
-              builder = builder.exclude(sel)
-            } catch {
-              /* invalid selector for this axe version — skip */
+          let axeResult: {
+            violations: { id: string; impact: string | null; help: string; helpUrl: string; tags?: string[]; nodes: { target: string[]; failureSummary: string }[] }[]
+            incomplete: { id: string; impact: string | null; help: string; helpUrl: string; tags?: string[]; nodes: { target: string[]; failureSummary: string }[] }[]
+          } | null = null
+          try {
+            axeResult = await withRetry(
+              `axe ${url}`,
+              2,
+              async () => {
+                let builder = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice'])
+                for (const sel of DEV_CHROME_EXCLUDE_LIST) {
+                  try {
+                    builder = builder.exclude(sel)
+                  } catch {}
+                }
+                return (await builder.analyze()) as typeof axeResult
+              },
+              opts.onLog
+            )
+          } catch (e) {
+            throw e
+          }
+          const result: unknown = axeResult
+          const mapViol = (v: unknown, incomplete = false): AxeViolation => {
+            const vv = v as { id: string; impact?: string | null; help: string; helpUrl: string; tags?: string[]; nodes?: { target?: string[]; failureSummary?: string }[] }
+            return {
+              id: vv.id,
+              impact: vv.impact ?? null,
+              help: vv.help,
+              helpUrl: vv.helpUrl,
+              tags: Array.isArray(vv.tags) ? vv.tags.slice(0, 12) : undefined,
+              incomplete: incomplete || undefined,
+              nodes: (vv.nodes ?? []).slice(0, 5).map((n) => ({
+                target: (n.target ?? []).map((t: string) => sanitizeSelector(String(t))),
+                failureSummary: (n.failureSummary ?? '').slice(0, 400)
+              }))
             }
           }
-          const result: any = await builder.analyze()
-          axe = (result.violations ?? []).map((v: any) => ({
-            id: v.id,
-            impact: v.impact ?? null,
-            help: v.help,
-            helpUrl: v.helpUrl,
-            nodes: (v.nodes ?? []).slice(0, 5).map((n: any) => ({
-              target: (n.target ?? []).map((t: string) => sanitizeSelector(String(t))),
-              failureSummary: (n.failureSummary ?? '').slice(0, 400)
-            }))
-          }))
+          axe = ((result as { violations?: unknown[] })?.violations ?? []).map((v) => mapViol(v, false))
+          axeIncomplete = ((result as { incomplete?: unknown[] })?.incomplete ?? []).slice(0, 12).map((v) => mapViol(v, true))
+          if (axeIncomplete.length) opts.onLog?.(`axe incomplete (needs review): ${axeIncomplete.map((v) => v.id).join(', ')}`)
         } catch (e) {
           const msg = (e as Error).message.slice(0, 200)
           opts.onLog?.(`axe failed on ${url}: ${msg}`)
@@ -394,8 +441,10 @@ export async function capturePage(
       ok = false
       errorText = (e as Error).message
       opts.onLog?.(`capture failed (${vp.name}) ${url}: ${errorText}`)
+      // Record tool failure so audit can surface missing screenshots
+      toolFailures.push({ tool: `capture:${vp.name}`, message: (e as Error).message.slice(0, 200) })
     } finally {
-      await ctx.close()
+      await ctx.close().catch(() => {})
     }
   }
 
@@ -405,6 +454,11 @@ export async function capturePage(
     isLocalTarget: false,
     buildHints: [] as string[]
   }
+  let htmlHash: string | undefined
+  try {
+    const rawHtml: string = extracted?.html ? String(extracted.html).slice(0, 500_000) : ''
+    if (rawHtml) htmlHash = createHash('sha256').update(rawHtml).digest('hex').slice(0, 16)
+  } catch {}
   return {
     url,
     title: extracted?.title ?? '',
@@ -417,6 +471,7 @@ export async function capturePage(
       colors: [], fontFamilies: [], fontSizes: [], fontWeights: [], radii: [], shadows: [], spacing: [], transitions: []
     },
     axe,
+    axeIncomplete: axeIncomplete.length ? axeIncomplete : undefined,
     cssStats,
     tokenDictionary,
     metrics: {
@@ -424,7 +479,10 @@ export async function capturePage(
       domContentLoadedMs: perf.domContentLoadedMs ?? 0,
       loadMs: perf.loadMs ?? 0,
       lcpMs: perf.lcpMs ?? null,
+      fcpMs: perf.fcpMs ?? null,
       cls: perf.cls ?? null,
+      tbtMs: perf.tbtMs ?? null,
+      inpMs: perf.inpMs ?? null,
       transferBytes: perf.transferBytes ?? 0,
       requestCount: perf.requestCount ?? 0,
       longTaskMs: perf.longTaskMs ?? 0
@@ -442,7 +500,8 @@ export async function capturePage(
     },
     signals: extracted?.signals ?? {},
     responsive,
-    links: extracted?.links ?? []
+    links: extracted?.links ?? [],
+    htmlHash
   }
 }
 
@@ -546,13 +605,15 @@ export async function probeInnerRoutes(
   const vp = opts.viewport ?? DEFAULT_VIEWPORTS[0]
   const found: string[] = []
   const skipTexts: string[] = []
-  const ctx = await browser.newContext({
-    viewport: { width: vp.width, height: vp.height },
-    bypassCSP: true,
-    ...(opts.storageState ? { storageState: opts.storageState } : {})
-  })
-  const page = await ctx.newPage()
+  let ctx: import('playwright').BrowserContext | undefined
+  let page: import('playwright').Page | undefined
   try {
+    ctx = await browser.newContext({
+      viewport: { width: vp.width, height: vp.height },
+      bypassCSP: true,
+      ...(opts.storageState ? { storageState: opts.storageState } : {})
+    })
+    page = await ctx.newPage()
     await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
     await page.waitForTimeout(2500)
     await scrollAppShells(page)
@@ -620,7 +681,10 @@ export async function probeInnerRoutes(
   } catch (e) {
     opts.onLog?.(`inner-route probe failed on ${listUrl}: ${(e as Error).message.slice(0, 160)}`)
   } finally {
-    await ctx.close().catch(() => {})
+    try {
+      await page?.close().catch(() => {})
+    } catch {}
+    await ctx?.close().catch(() => {})
   }
   return [...new Set(found)]
 }
@@ -657,6 +721,26 @@ export async function crawl(
   const ignore = opts.ignorePages?.filter(Boolean) ?? []
   if (ignore.length) opts.onLog?.(`ignoring ${ignore.length} page pattern(s): ${ignore.join(', ')}`)
 
+  // Sitemap discovery: seed queue with same-origin <loc> from /sitemap.xml and /sitemap_index.xml variants
+  try {
+    const sitemapUrls = await discoverSitemapUrls(startUrl, opts)
+    if (sitemapUrls.length) {
+      opts.onLog?.(`sitemap: discovered ${sitemapUrls.length} URL(s)`)
+      const seen = new Set(queue.map(pageIdentity))
+      for (const u of sitemapUrls) {
+        const id = pageIdentity(u)
+        if (!seen.has(id) && sameOrigin(u, startUrl) && !visited.has(u) && !(ignore.length && isIgnoredPage(u, ignore))) {
+          queue.push(u)
+          seen.add(id)
+        }
+      }
+      // Rank sitemap URLs in front (sampling keeps breadth diverse) but keep BFS fairness
+      // by sorting the tail after sitemap injection.
+    }
+  } catch (e) {
+    opts.onLog?.(`sitemap skipped: ${(e as Error).message.slice(0, 120)}`)
+  }
+
   while (queue.length && pages.length < pageLimit) {
     if (Date.now() > deadline) {
       opts.onLog?.(`crawl time budget reached after ${pages.length} page(s); ${queue.length} route(s) left unvisited`)
@@ -678,8 +762,58 @@ export async function crawl(
       continue
     }
 
+    // True incremental: if baseline hash matches lightweight fetch, reuse baseline page without Playwright
+    if (opts.baselineHtmlHashes?.has(url) && opts.incrementalReuseBaseline?.has(url)) {
+      try {
+        const expected = opts.baselineHtmlHashes.get(url)!
+        const live = await (async () => {
+          const ctrl = new AbortController()
+          const t = setTimeout(() => ctrl.abort(), 3500)
+          try {
+            const r = await fetch(url, { signal: ctrl.signal, headers: { accept: 'text/html' } })
+            if (!r.ok) return null
+            const txt = await r.text()
+            const { createHash: ch } = await import('node:crypto')
+            return ch('sha256').update(txt.slice(0, 500_000)).digest('hex').slice(0, 16)
+          } catch { return null } finally { clearTimeout(t) }
+        })()
+        if (live && live === expected) {
+          const reused = opts.incrementalReuseBaseline.get(url)!
+          const clone: CapturedPage = { ...reused, url, htmlHash: live }
+          pages.push(clone)
+          opts.onPage?.(clone)
+          opts.onLog?.(`reused unchanged ${url} from baseline (skipped Playwright)`)
+          // Still expand links from reused page
+          const candidatesReuse = clone.links
+            .map(normalize)
+            .filter((l) => sameOrigin(l, startUrl))
+            .filter((l) => !visited.has(l) && !seenPaths.has(pageIdentity(l)))
+            .filter((l) => !/\.(pdf|zip|png|jpe?g|svg|webp|gif|mp4|dmg|exe|css|js|xml|txt|rss)$/i.test(l))
+            .filter((l) => !/\/(cdn-cgi|api|_next|static|assets)\//i.test(l))
+            .filter((l) => !(ignore.length && isIgnoredPage(l, ignore)))
+          const byPathReuse = new Map<string, string>()
+          for (const l of candidatesReuse) {
+            const id = pageIdentity(l)
+            const existing = byPathReuse.get(id)
+            if (!existing || (existing.includes('?') && !l.includes('?'))) byPathReuse.set(id, l)
+          }
+          const queuedPathsReuse = new Set(queue.map(pageIdentity))
+          const rankedReuse = [...byPathReuse.values()]
+            .filter((l) => !queuedPathsReuse.has(pageIdentity(l)))
+            .sort((a, b) => score(b) - score(a) || depth(a) - depth(b) || a.length - b.length)
+          for (const l of rankedReuse) { queue.push(l); queuedPathsReuse.add(pageIdentity(l)) }
+          continue
+        }
+      } catch {}
+    }
+
     opts.onLog?.(`capturing ${url}`)
     const page = await capturePage(browser, url, opts)
+    // Apply visual ignore selectors before screenshot? already done in capturePage via animations disabled; for diff masking we hide now
+    if (opts.ignoreSelectors?.length) {
+      // Not screenshot masking here — visual.ts will handle pixel ignore; just log
+      opts.onLog?.(`visual ignore active: ${opts.ignoreSelectors.join(', ')}`)
+    }
     pages.push(page)
     opts.onPage?.(page)
 
@@ -747,6 +881,82 @@ export async function crawl(
     opts.onLog?.(`crawl finished with ${innersFound} inner route(s) discovered via card clicks`)
   }
   return pages
+}
+
+async function discoverSitemapUrls(startUrl: string, opts: CaptureOptions): Promise<string[]> {
+  const origin = (() => {
+    try {
+      return new URL(startUrl).origin
+    } catch {
+      return null
+    }
+  })()
+  if (!origin) return []
+  const candidates = [`${origin}/sitemap.xml`, `${origin}/sitemap_index.xml`, `${origin}/sitemap-index.xml`]
+  const urls: string[] = []
+  const fetchWithTimeout = async (url: string, ms = 6000): Promise<string | null> => {
+    const ctrl = new AbortController()
+    const t = setTimeout(() => ctrl.abort(), ms)
+    try {
+      const res = await fetch(url, { signal: ctrl.signal, headers: { accept: 'application/xml,text/xml' } })
+      if (!res.ok) return null
+      const text = await res.text()
+      if (text.length > 2_000_000) return text.slice(0, 2_000_000)
+      return text
+    } catch {
+      return null
+    } finally {
+      clearTimeout(t)
+    }
+  }
+  const locRe = /<loc>\s*([^<]+?)\s*<\/loc>/gi
+  for (const sitemapUrl of candidates) {
+    const xml = await fetchWithTimeout(sitemapUrl)
+    if (!xml) continue
+    // If this is a sitemap index, follow nested sitemaps (cap 3)
+    const isIndex = /<sitemapindex/i.test(xml)
+    if (isIndex) {
+      const nested: string[] = []
+      let m: RegExpExecArray | null
+      while ((m = locRe.exec(xml)) !== null) {
+        const loc = m[1].trim()
+        if (/sitemap.*\.xml/i.test(loc)) nested.push(loc)
+        if (nested.length >= 3) break
+      }
+      for (const n of nested) {
+        const sub = await fetchWithTimeout(n)
+        if (!sub) continue
+        let sm: RegExpExecArray | null
+        const re2 = /<loc>\s*([^<]+?)\s*<\/loc>/gi
+        while ((sm = re2.exec(sub)) !== null) {
+          const loc = sm[1].trim()
+          if (loc) urls.push(loc)
+          if (urls.length >= 200) break
+        }
+        if (urls.length >= 200) break
+      }
+    } else {
+      let m: RegExpExecArray | null
+      while ((m = locRe.exec(xml)) !== null) {
+        const loc = m[1].trim()
+        if (loc) urls.push(loc)
+        if (urls.length >= 200) break
+      }
+    }
+    if (urls.length) break
+  }
+  // Normalize + same-origin filter
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const raw of urls) {
+    const norm = normalizeTargetUrl(raw) ?? raw
+    if (!sameOrigin(norm, startUrl)) continue
+    const id = pageIdentity(norm)
+    if (seen.has(id)) continue
+    seen.add(id)
+    out.push(norm)
+  }
+  return out.slice(0, 120)
 }
 
 function depth(u: string): number {

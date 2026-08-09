@@ -25,11 +25,12 @@ import { runLighthouse } from './lighthouse.js'
 import { runPa11y } from './pa11y.js'
 import { assetsDir, ensureRunDir, listRuns, saveRun } from './store.js'
 import { resolveCredential, saveCredential } from './vault.js'
+import { classifyPagesAfterCapture, fingerprintPage } from './diff.js'
 import { applyProductionPresence, partitionProductFindings } from './provenance.js'
 import { isKitSpecimenPath, pickCritiqueTargets, pickInteractionTargets } from './brokenUi.js'
 import { summarizePremiumCraft, type PremiumDimensionScores } from './premiumCraft.js'
 import { mapPool } from './pool.js'
-import type { Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
+import type { CapturedPage, Finding, Run, RunConfig, RunProgress, Settings } from '../../shared/types.js'
 
 type Emit = (p: RunProgress) => void
 
@@ -51,21 +52,31 @@ interface ActiveRun {
 }
 
 const active = new Map<string, ActiveRun>()
-/** Runs cancelled between "start" and the first line of executeRun. */
-const cancelledBeforeStart = new Set<string>()
+/** Runs cancelled between "start" and the first line of executeRun — evicted after 5 min or on next run. */
+const cancelledBeforeStart = new Map<string, number>()
+const CANCELLED_TTL_MS = 5 * 60_000
+
+function gcCancelledBeforeStart(): void {
+  const now = Date.now()
+  for (const [id, ts] of cancelledBeforeStart) {
+    if (now - ts > CANCELLED_TTL_MS) cancelledBeforeStart.delete(id)
+  }
+}
 
 export function cancelRun(id: string): boolean {
+  gcCancelledBeforeStart()
   const s = active.get(id)
   if (!s) {
-    // The run may not have reached executeRun yet; remember the intent.
-    cancelledBeforeStart.add(id)
+    cancelledBeforeStart.set(id, Date.now())
     return false
   }
   if (s.cancelled) return true
   s.cancelled = true
   s.controller.abort()
-  s.reject(new CancelledError())
-  s.browser?.close().catch(() => {})
+  try {
+    s.reject(new CancelledError())
+  } catch {}
+  // Actual close is handled in executeRun finally with isConnected guard
   return true
 }
 
@@ -74,13 +85,13 @@ export function isCancelled(id: string): boolean {
 }
 
 export function newRun(config: RunConfig): Run {
+  const pid = config.projectId
   return {
-    id: randomUUID().slice(0, 8),
+    id: randomUUID(),
+    projectId: pid,
+    baselineRunId: config.baselineRunId,
     createdAt: Date.now(),
     status: 'queued',
-    // The live run needs the real credentials to sign in; redaction happens at
-    // the persistence and IPC boundaries (store.saveRun / redactRun), never here
-    // — redacting at construction meant the browser typed "••••••••" as the password.
     config,
     pages: [],
     findings: [],
@@ -103,10 +114,11 @@ export async function executeRun(
   const cancelledPromise = new Promise<never>((_, reject) => {
     rejectCancelled = reject
   })
-  // Nothing listens synchronously; without this Node logs an unhandled rejection.
   cancelledPromise.catch(() => {})
+  const wasCancelledBeforeStart = cancelledBeforeStart.has(run.id)
+  if (wasCancelledBeforeStart) cancelledBeforeStart.delete(run.id)
   const state: ActiveRun = {
-    cancelled: cancelledBeforeStart.delete(run.id),
+    cancelled: wasCancelledBeforeStart,
     controller: new AbortController(),
     cancelledPromise,
     reject: rejectCancelled
@@ -131,10 +143,27 @@ export async function executeRun(
     run.log.push({ ts: Date.now(), level, msg })
     if (run.log.length > 500) run.log.shift()
   }
+  let lastProgressAt = 0
+  let lastProgressKey = ''
   const progress = (phase: string, pct: number, msg: string): void => {
-    emit({ runId: run.id, phase, pct, msg })
+    const key = `${phase}:${pct}`
+    const now = Date.now()
+    // Throttle identical progress bursts to at most one per 200ms, always allow phase changes
+    if (key === lastProgressKey && now - lastProgressAt < 200) {
+      log('info', msg)
+      return
+    }
+    lastProgressKey = key
+    lastProgressAt = now
+    try {
+      emit({ runId: run.id, phase, pct, msg })
+    } catch {}
     log('info', msg)
-    onUpdate(run)
+    try {
+      onUpdate(structuredClone(run))
+    } catch {
+      onUpdate(run)
+    }
   }
 
   if (state.cancelled) {
@@ -149,8 +178,8 @@ export async function executeRun(
     return run
   }
 
-  const dir = await ensureRunDir(run.id)
-  const assets = assetsDir(run.id)
+  const dir = await ensureRunDir(run.id, run.projectId)
+  const assets = assetsDir(run.id, run.projectId)
   run.status = 'running'
   const cfg: RunConfig = { ...run.config, geminiApiKey: settings.geminiApiKey }
   const creds = credsFromSettings(settings)
@@ -227,18 +256,65 @@ export async function executeRun(
       6,
       `Crawling ${!cfg.maxPages || cfg.maxPages <= 0 ? 'every reachable page' : `up to ${cfg.maxPages} page(s)`}${storageState ? ' (signed in)' : ''}`
     )
+    // Git context for branch-aware baseline (Argos/Chromatic parity)
+    run.git = {
+      branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || process.env.GIT_BRANCH || undefined,
+      sha: process.env.GITHUB_SHA || process.env.GIT_COMMIT || undefined,
+      baseSha: process.env.GITHUB_BASE_SHA || undefined,
+      baseBranch: process.env.GITHUB_BASE_REF || undefined
+    }
+    if (!run.git.branch) delete run.git.branch
+    if (!run.git.sha) delete run.git.sha
+
+    // Pre-resolve baseline for true incremental crawl (skip Playwright for unchanged htmlHash matches)
+    let incrementalBaseline: Run | null = null
+    let incrementalHashes: Map<string, string> | undefined
+    let incrementalReuse: Map<string, CapturedPage> | undefined
+    let diffBaseline: Run | null = null
+    let changedUrls = new Set<string>()
+    if (cfg.diffMode === 'changed-only') {
+      try {
+        if (cfg.baselineRunId) {
+          const all = await listRuns(run.projectId)
+          incrementalBaseline = all.find((r) => r.id === cfg.baselineRunId) ?? null
+        }
+        if (!incrementalBaseline) {
+          const all = await listRuns(run.projectId)
+          // Pick approved baseline, branch-aware
+          const branch = run.git?.branch
+          if (branch) incrementalBaseline = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false && r.git?.branch === branch) ?? null
+          if (!incrementalBaseline) incrementalBaseline = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false) ?? null
+        }
+        if (incrementalBaseline?.pages?.some((p) => p.htmlHash)) {
+          incrementalHashes = new Map(incrementalBaseline.pages.filter((p) => p.htmlHash).map((p) => [p.url, p.htmlHash!]))
+          incrementalReuse = new Map(incrementalBaseline.pages.map((p) => [p.url, p]))
+          log('info', `Incremental: baseline ${incrementalBaseline.id} provides ${incrementalHashes.size} html hashes — unchanged pages will skip Playwright`)
+        }
+      } catch (e) {
+        log('warn', `Incremental baseline pre-resolve failed: ${(e as Error).message}`)
+      }
+    }
+
     // Pages land as they finish, so cancelling mid-crawl keeps completed work.
     const unlimited = !cfg.maxPages || cfg.maxPages <= 0
+    // Resolve visual ignore selectors early for incremental masking log
+    let crawlIgnoreSelectors: string[] = []
+    try {
+      const { loadQualitionRc } = await import('./config.js')
+      const { rc: rcEarly } = await loadQualitionRc()
+      crawlIgnoreSelectors = rcEarly?.visual?.ignoreSelectors?.filter((s): s is string => typeof s === 'string' && !!s.trim()).slice(0, 20) ?? []
+    } catch {}
     run.pages = []
     await crawl(browser, cfg.targetUrl, cfg.maxPages, {
       viewports: cfg.viewports.length ? cfg.viewports : DEFAULT_VIEWPORTS,
       outDir: assets,
       storageState,
-      // Unlimited crawls still get a safety net so a generated URL space
-      // cannot trap the run indefinitely.
       budgetMs: unlimited ? 45 * 60_000 : undefined,
       shouldStop: () => state.cancelled,
       ignorePages: cfg.ignorePages,
+      ignoreSelectors: crawlIgnoreSelectors,
+      baselineHtmlHashes: incrementalHashes,
+      incrementalReuseBaseline: incrementalReuse,
       onPage: (p) => {
         run.pages.push(p)
         progress(
@@ -251,6 +327,53 @@ export async function executeRun(
     })
     checkpoint()
     progress('crawl', 30, `Captured ${run.pages.length} page(s), ${run.pages.reduce((n, p) => n + p.sections.length, 0)} section(s)`)
+
+    // Diff summary for report/trend (classify after capture)
+    if (cfg.diffMode === 'changed-only') {
+      diffBaseline = incrementalBaseline
+      if (!diffBaseline) {
+        try {
+          if (cfg.baselineRunId) {
+            const all = await listRuns(run.projectId)
+            diffBaseline = all.find((r) => r.id === cfg.baselineRunId) ?? null
+          }
+          if (!diffBaseline) {
+            const all = await listRuns(run.projectId)
+            diffBaseline = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false) ?? null
+          }
+        } catch {}
+      }
+      if (diffBaseline) {
+        try {
+          run.baselineRunId = diffBaseline.id
+          run.comparedToRunId = diffBaseline.id
+          const cls = classifyPagesAfterCapture(run.pages, diffBaseline)
+          changedUrls = new Set(cls.changed.map((p) => p.url))
+          const unchangedCount = cls.unchanged.length
+          const newCount = cls.newPages.length
+          const removedCount = diffBaseline.pages.filter((p) => !run.pages.some((q) => q.url === p.url)).length
+          const reused = run.pages.filter((p) => incrementalHashes?.has(p.url) && incrementalHashes.get(p.url) === p.htmlHash).length
+          run.diffSummary = {
+            baselineRunId: diffBaseline.id,
+            totalPages: run.pages.length,
+            changedPages: cls.changed.length,
+            unchangedPages: unchangedCount,
+            newPages: newCount,
+            removedPages: removedCount,
+            reusedFromBaseline: reused
+          }
+          if (unchangedCount > 0) {
+            log('info', `Diff mode: ${cls.changed.length} changed / ${unchangedCount} unchanged / ${newCount} new vs baseline ${diffBaseline.id} — heavy audits scoped to changed pages, ${reused} reused without Playwright`)
+          } else {
+            log('info', `Diff mode: no unchanged pages vs ${diffBaseline.id} — full audit`)
+          }
+        } catch (e) {
+          log('warn', `Diff summary failed: ${(e as Error).message}`)
+        }
+      } else {
+        log('info', 'Diff mode requested but no baseline found — running full audit')
+      }
+    }
 
     /* 2. deterministic audit */
     // What kind of product is this? Everything reference-related depends on it.
@@ -296,9 +419,36 @@ export async function executeRun(
         lighthouseOn ? 'Running Lighthouse + pa11y in parallel' : 'Running pa11y (Lighthouse off)'
       )
 
-      const previousPromise = listRuns().then((runs) =>
-        runs.find((r) => r.id !== run.id && r.status === 'done' && r.config.targetUrl === cfg.targetUrl)
-      )
+      const rcForVisual = await (async () => {
+        try { const { loadQualitionRc } = await import('./config.js'); const { rc } = await loadQualitionRc(); return rc } catch { return null }
+      })()
+      const visualThreshold = (() => {
+        try {
+          const v = rcForVisual?.visual?.diffThreshold
+          if (typeof v === 'number' && v >= 0 && v <= 1) return v
+          const t = rcForVisual?.thresholds?.visualDiffThreshold
+          if (typeof t === 'number' && t >= 0 && t <= 1) return t
+        } catch {}
+        return undefined
+      })()
+      const visualIgnoreSelectors = rcForVisual?.visual?.ignoreSelectors?.filter((s): s is string => typeof s === 'string' && !!s.trim()).slice(0, 20) ?? []
+      const previousPromise = (async () => {
+        if (diffBaseline) return diffBaseline
+        // Branch-aware: prefer same branch/baseBranch; fallback to latest done (approved-only)
+        const all = await listRuns(run.projectId)
+        const branch = run.git?.branch
+        if (branch) {
+          const sameBranch = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false && r.git?.branch === branch)
+          if (sameBranch) return sameBranch
+        }
+        // Respect referenceBranch override (Argos/Percy parity)
+        const refBranch = rcForVisual?.baseline?.referenceBranch || process.env.ARGOS_REFERENCE_BRANCH || process.env.PERCY_TARGET_BRANCH
+        if (refBranch) {
+          const ref = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false && r.git?.branch === refBranch)
+          if (ref) return ref
+        }
+        return all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false) ?? null
+      })()
 
       const [lhSettled, pa11ySettled, visualSettled] = await Promise.all([
         lighthouseOn
@@ -324,7 +474,7 @@ export async function executeRun(
         previousPromise
           .then(async (previous) => {
             if (!previous) return { ok: true as const, previous: null, diffs: null }
-            const result = await compareWithBaseline(run.pages, previous, assets)
+            const result = await compareWithBaseline(run.pages, previous, assets, visualThreshold ?? 0.02, visualIgnoreSelectors)
             return { ok: true as const, previous, diffs: result }
           })
           .catch((e) => ({ ok: false as const, e }))
@@ -401,7 +551,12 @@ export async function executeRun(
       const PROBE_PAGE_CAP = 8
       const PROBE_CONCURRENCY = 2
       const PROBE_BUDGET_MS = 60_000
-      const probeTargets = pickInteractionTargets(run.pages, PROBE_PAGE_CAP, 3)
+      let probePool = run.pages
+      if (cfg.diffMode === 'changed-only' && changedUrls.size > 0) {
+        const filtered = run.pages.filter((p) => changedUrls.has(p.url))
+        if (filtered.length > 0) probePool = filtered
+      }
+      const probeTargets = pickInteractionTargets(probePool, PROBE_PAGE_CAP, 3)
       if (run.pages.length > PROBE_PAGE_CAP) {
         log(
           'info',
@@ -560,7 +715,13 @@ export async function executeRun(
       const CRITIQUE_CONCURRENCY = 3
       const findingCountFor = (p: (typeof run.pages)[0]) =>
         run.findings.filter((f) => f.pageUrl === p.url).length
-      const targetsForCritique = pickCritiqueTargets(run.pages, findingCountFor, PAGE_BUDGET, 3)
+      let critiquePool = run.pages
+      if (cfg.diffMode === 'changed-only' && changedUrls.size > 0) {
+        const filtered = run.pages.filter((p) => changedUrls.has(p.url))
+        if (filtered.length > 0) critiquePool = filtered
+        else log('info', 'Diff mode: no changed pages for critique — using full pool')
+      }
+      const targetsForCritique = pickCritiqueTargets(critiquePool, findingCountFor, PAGE_BUDGET, 3)
       if (run.pages.length > PAGE_BUDGET) {
         log(
           'info',
@@ -1000,10 +1161,23 @@ export async function executeRun(
     run.buildMode =
       modes.includes('development') ? 'development' : modes.includes('production') ? 'production' : 'unknown'
 
-    // Per-finding delta vs prior done run for this target.
+    // .qualitionrc — suppress false positives without code edits
     try {
-      const prior = (await listRuns())
-        .filter((r) => r.status === 'done' && r.id !== run.id && r.config.targetUrl === cfg.targetUrl)
+      const { loadQualitionRc, shouldSuppressFinding } = await import('./config.js')
+      const { rc, path: rcPath } = await loadQualitionRc()
+      if (rc) {
+        const before = run.findings.length
+        run.findings = run.findings.filter((f) => !shouldSuppressFinding(rc, f))
+        const dropped = before - run.findings.length
+        if (dropped > 0) log('info', `.qualitionrc ${rcPath}: suppressed ${dropped} finding(s)`)
+      }
+    } catch {}
+
+    // Per-finding delta vs prior done run (approved-only, pageUrl-aware shape)
+    try {
+      const allForDelta = await listRuns(run.projectId)
+      const prior = allForDelta
+        .filter((r) => r.status === 'done' && r.id !== run.id && r.approved !== false)
         .sort((a, b) => (b.finishedAt ?? b.createdAt) - (a.finishedAt ?? a.createdAt))[0]
       if (prior?.findings?.length) {
         run.comparedToRunId = prior.id
@@ -1020,10 +1194,57 @@ export async function executeRun(
       /* listRuns may fail mid-run */
     }
 
-    run.scorecard = scoreRun(run.findings, run.pages.length, cfg.brutality)
+    // Per-metric budgets: enforce before scoring (LHCI-style gates)
+    try {
+      const { loadQualitionRc } = await import('./config.js')
+      const { rc } = await loadQualitionRc()
+      const budgets = (cfg.budgets as any) ?? rc?.budgets ?? null
+      if (budgets?.metrics) {
+        const mMetrics = budgets.metrics as Record<string, number>
+        const aggLcp = Math.max(...run.pages.map(p => p.metrics.lcpMs ?? 0))
+        const aggCls = Math.max(...run.pages.map(p => p.metrics.cls ?? 0))
+        const aggTbt = Math.max(...run.pages.map(p => (p.metrics as any).tbtMs ?? p.metrics.longTaskMs ?? 0))
+        const aggFcp = Math.max(...run.pages.map(p => (p.metrics as any).fcpMs ?? 0))
+        const aggBytes = Math.max(...run.pages.map(p => p.metrics.transferBytes))
+        const lhPerf = run.lighthouse ? (run.lighthouse.performance ?? 1) * 100 : null
+        const violations: string[] = []
+        if (mMetrics.maxLcpMs != null && aggLcp > mMetrics.maxLcpMs) violations.push(`LCP ${aggLcp}ms > budget ${mMetrics.maxLcpMs}ms`)
+        if (mMetrics.maxCls != null && aggCls > mMetrics.maxCls) violations.push(`CLS ${aggCls} > budget ${mMetrics.maxCls}`)
+        if (mMetrics.maxTbtMs != null && aggTbt > mMetrics.maxTbtMs) violations.push(`TBT ${aggTbt}ms > budget ${mMetrics.maxTbtMs}ms`)
+        if (mMetrics.maxFcpMs != null && aggFcp > mMetrics.maxFcpMs) violations.push(`FCP ${aggFcp}ms > budget ${mMetrics.maxFcpMs}ms`)
+        if (mMetrics.maxTransferBytes != null && aggBytes > mMetrics.maxTransferBytes) violations.push(`transfer ${aggBytes}B > budget ${mMetrics.maxTransferBytes}B`)
+        if (mMetrics.minLighthousePerformance != null && lhPerf != null && lhPerf < mMetrics.minLighthousePerformance) violations.push(`Lighthouse perf ${lhPerf} < budget ${mMetrics.minLighthousePerformance}`)
+        if (violations.length) {
+          log('warn', `Budget violations: ${violations.join('; ')}`)
+          for (const v of violations) {
+            run.findings.push({ id: `budget-${Math.random().toString(36).slice(2,6)}`, category: 'performance', severity: 'major', title: `Budget exceeded: ${v}`, detail: v, fix: 'Tune performance to meet budget or adjust .qualitionrc budgets.metrics', pageUrl: cfg.targetUrl, source: 'heuristic' })
+          }
+        }
+      }
+      if (budgets?.perCategory) {
+        // will be checked after scorecard
+      }
+    } catch {}
+
+    run.scorecard = scoreRun(run.findings, run.pages.length, cfg.brutality, run.lighthouse ? { performance: run.lighthouse.performance } : undefined)
     const aiDims = (run as { _aiPremiumDims?: Partial<PremiumDimensionScores> })._aiPremiumDims
     run.scorecard.premium = summarizePremiumCraft(run.pages, aiDims)
     delete (run as { _aiPremiumDims?: Partial<PremiumDimensionScores> })._aiPremiumDims
+    // Per-category minimum gates post-score
+    try {
+      const { loadQualitionRc } = await import('./config.js')
+      const { rc } = await loadQualitionRc()
+      const perCat = (cfg.budgets as any)?.perCategory ?? rc?.budgets?.perCategory
+      if (perCat) {
+        for (const [cat, min] of Object.entries(perCat as Record<string, number>)) {
+          const sc = (run.scorecard.categories as any)[cat]?.score
+          if (typeof sc === 'number' && sc < min) {
+            log('warn', `Category budget: ${cat} ${sc} < ${min}`)
+            run.findings.push({ id: `budget-cat-${cat}`, category: cat as any, severity: 'major', title: `Category ${cat} score ${sc} below budget ${min}`, detail: `Scorecard ${cat} ${sc} < ${min}`, fix: 'Address findings in this category', pageUrl: cfg.targetUrl, source: 'heuristic' })
+          }
+        }
+      }
+    } catch {}
     if (aiEnabled && !state.cancelled) {
       try {
         run.geminiNotes = await raceCancel(
@@ -1035,10 +1256,24 @@ export async function executeRun(
       }
     }
 
-    await browser.close()
+    // Auto-approve: by default every done run becomes a baseline; .qualitionrc can restrict to branches
+    try {
+      const { loadQualitionRc } = await import('./config.js')
+      const { rc } = await loadQualitionRc()
+      const autoBranches = rc?.approvals?.autoApproveBranches ?? rc?.baseline?.autoApproveBranch ? [rc.baseline!.autoApproveBranch!] : null
+      if (rc?.approvals?.autoApprove === false) {
+        run.approved = false
+      } else if (autoBranches && run.git?.branch) {
+        run.approved = autoBranches.includes(run.git.branch)
+      } else {
+        run.approved = true
+      }
+    } catch { run.approved = true }
+
+    if (browser.isConnected()) await browser.close().catch(() => {})
     run.status = 'done'
     run.finishedAt = Date.now()
-    progress('done', 100, `Done · grade ${run.scorecard.grade} (${run.scorecard.overall}/100)${run.scorecard.premium ? ` · premium ${run.scorecard.premium.grade}` : ''} · ${run.findings.length} findings`)
+    progress('done', 100, `Done · grade ${run.scorecard.grade} (${run.scorecard.overall}/100)${run.scorecard.premium ? ` · premium ${run.scorecard.premium.grade}` : ''} · ${run.findings.length} findings${run.approved === false ? ' · not approved as baseline' : ''}`)
   } catch (e) {
     const msg = (e as Error).message
     // Cancelling closes the browser, so in-flight Playwright calls throw their
@@ -1078,16 +1313,28 @@ export async function executeRun(
       emit({ runId: run.id, phase: 'failed', pct: 100, msg })
     }
     try {
-      await state.browser?.close()
+      const b = state.browser
+      if (b?.isConnected()) await b.close().catch(() => {})
     } catch {
       /* already gone */
     }
   } finally {
-    // MCP transports hold open streams; drop them when the run is over.
-    await Promise.allSettled([closeMobbin(), closeShoogle()])
+    // MCP transports hold open streams; drop them when the run is over with timeout.
+    try {
+      await Promise.race([
+        Promise.allSettled([closeMobbin(), closeShoogle()]),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('MCP close timeout')), 5000).unref?.() ?? setTimeout(() => rej(new Error('MCP close timeout')), 5000))
+      ])
+    } catch {}
     active.delete(run.id)
-    await saveRun(run)
-    onUpdate(run)
+    try {
+      await saveRun(run)
+    } catch {}
+    try {
+      onUpdate(structuredClone(run))
+    } catch {
+      onUpdate(run)
+    }
   }
   void dir
   return run

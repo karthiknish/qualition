@@ -73,10 +73,20 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
   const elapsedLabel = formatDuration(elapsedMs)
 
   const page: CapturedPage | undefined = run.pages[pageIdx]
-  const findings = run.findings
+  const findings = useMemo(() => run.findings
     .filter((f) => sevFilter === 'all' || f.severity === sevFilter)
     .filter((f) => catFilter === 'all' || f.category === catFilter)
-    .sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity))
+    .sort((a, b) => SEV_ORDER.indexOf(a.severity) - SEV_ORDER.indexOf(b.severity)), [run.findings, sevFilter, catFilter])
+  const sevCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const f of run.findings) m.set(f.severity, (m.get(f.severity) ?? 0) + 1)
+    return m
+  }, [run.findings])
+  const catCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const f of run.findings) m.set(f.category, (m.get(f.category) ?? 0) + 1)
+    return m
+  }, [run.findings])
 
   const statusBadge =
     run.status === 'done'
@@ -124,7 +134,15 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
           <CopyPrompt runId={run.id} />
           <Button size="sm" onClick={() => api.exportRun(run.id)}>
             <FileDown size={13} />
-            Export markdown
+            Export md
+          </Button>
+          <Button size="sm" onClick={() => api.exportHtml(run.id)}>
+            <FileDown size={13} />
+            HTML
+          </Button>
+          <Button size="sm" onClick={() => api.exportSarif(run.id)}>
+            <FileDown size={13} />
+            SARIF
           </Button>
           <Button size="sm" variant="ghost" onClick={() => api.revealRun(run.id)}>
             <FolderOpen size={13} />
@@ -161,12 +179,23 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
         </div>
       )}
 
-      <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md">
-        <div className="flex gap-0.5 overflow-x-auto">
+      <nav className="sticky top-0 z-10 -mx-6 border-b border-zinc-800/80 bg-zinc-950/85 px-6 backdrop-blur-md" aria-label="Report sections">
+        <div className="flex gap-0.5 overflow-x-auto" role="tablist">
           {TAB_META.map(({ id: t, icon: Icon }) => (
             <button
               key={t}
+              role="tab"
+              aria-selected={tab === t}
+              aria-controls={`panel-${t}`}
               onClick={() => setTab(t)}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                  e.preventDefault()
+                  const idx = TAB_META.findIndex((x) => x.id === tab)
+                  const next = e.key === 'ArrowRight' ? (idx + 1) % TAB_META.length : (idx - 1 + TAB_META.length) % TAB_META.length
+                  setTab(TAB_META[next].id)
+                }
+              }}
               className={cx(
                 '-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-[13px] capitalize transition-colors',
                 tab === t
@@ -191,7 +220,7 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
             </Chip>
             {SEV_ORDER.map((s) => (
               <Chip key={s} active={sevFilter === s} onClick={() => setSevFilter(s)}>
-                {s} ({run.findings.filter((f) => f.severity === s).length})
+                {s} ({sevCounts.get(s) ?? 0})
               </Chip>
             ))}
             <span className="mx-1 w-px self-stretch bg-zinc-800" />
@@ -200,7 +229,7 @@ export default function Report({ run, progress }: { run: Run | null; progress: R
             </Chip>
             {Object.keys(CATEGORY_LABEL).map((c) => (
               <Chip key={c} active={catFilter === c} onClick={() => setCatFilter(c)}>
-                {c} ({run.findings.filter((f) => f.category === c).length})
+                {c} ({catCounts.get(c) ?? 0})
               </Chip>
             ))}
           </div>
@@ -1140,10 +1169,22 @@ function Lightbox({
   shot: { src: string; label: string; link?: string } | null
   onClose: () => void
 }): JSX.Element | null {
+  useEffect(() => {
+    if (!shot) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [shot, onClose])
   if (!shot) return null
+  const src = shot.src.startsWith('http') ? shot.src : (api.asset(shot.src) ?? '')
   return (
     <div
       onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={shot.label}
       className="fixed inset-0 z-50 flex flex-col items-center overflow-y-auto bg-black/85 p-6 backdrop-blur-sm"
     >
       <div className="mb-2 flex w-full max-w-[1440px] items-center justify-between gap-3">
@@ -1160,13 +1201,14 @@ function Lightbox({
               open in Mobbin ↗
             </button>
           )}
-          <span className="text-[11px] text-zinc-500">click anywhere to close</span>
+          <span className="text-[11px] text-zinc-500">click anywhere or press Esc to close</span>
         </span>
       </div>
       <img
-        src={shot.src.startsWith('http') ? shot.src : api.asset(shot.src)}
+        src={src}
         alt={shot.label}
         onClick={(e) => e.stopPropagation()}
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
         className="w-full max-w-[1440px] rounded-lg border border-zinc-700"
       />
     </div>

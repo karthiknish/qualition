@@ -8,12 +8,13 @@ import { Button, Empty, Input, PageHeader, Panel } from '../components/ui'
 export default function Explore({ runId }: { runId?: string }): JSX.Element {
   const [mQuery, setMQuery] = useState('pricing section with plan cards and toggle')
   const [kind, setKind] = useState<'screen' | 'section'>('screen')
-  const [refs, setRefs] = useState<MobbinReference[]>([])
+  const [refs, setRefs] = useState<{ title: string; appName?: string; imageUrl: string; mobbinUrl?: string }[]>([])
   const [mBusy, setMBusy] = useState(false)
   const [mError, setMError] = useState('')
 
   const [rQuery, setRQuery] = useState('accordion')
-  const [items, setItems] = useState<any[]>([])
+  type RegistryItem = { name: string; registry: string; type?: string; description?: string; addCommand?: string; docs?: string }
+  const [items, setItems] = useState<RegistryItem[]>([])
   const [rBusy, setRBusy] = useState(false)
 
   const searchMobbin = async (): Promise<void> => {
@@ -91,8 +92,10 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
               >
                 {r.imageUrl && (
                   <img
-                    src={r.imageUrl.startsWith('http') ? r.imageUrl : api.asset(r.imageUrl)}
+                    src={r.imageUrl.startsWith('http') ? r.imageUrl : (api.asset(r.imageUrl) ?? '')}
                     alt={r.title}
+                    loading="lazy"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
                     className="h-44 w-full rounded-xl border border-zinc-800 object-cover object-top transition-[border-color,transform] group-hover:border-zinc-600 group-hover:scale-[1.01]"
                   />
                 )}
@@ -138,7 +141,7 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
                     </span>
                   </span>
                   <button
-                    onClick={() => navigator.clipboard.writeText(i.addCommand)}
+                    onClick={() => i.addCommand && navigator.clipboard.writeText(i.addCommand)}
                     className="inline-flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-100"
                     title="Copy install command"
                   >
@@ -149,7 +152,7 @@ export default function Explore({ runId }: { runId?: string }): JSX.Element {
                 <p className="mt-1 text-[11px] leading-snug text-zinc-500">{i.description}</p>
                 {i.docs && (
                   <button
-                    onClick={() => api.openExternal(i.docs)}
+                    onClick={() => i.docs && api.openExternal(i.docs)}
                     className="mt-1.5 inline-flex items-center gap-1 text-[10px] text-sky-400 hover:underline"
                   >
                     <BookOpen size={10} />

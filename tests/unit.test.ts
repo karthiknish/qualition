@@ -1365,8 +1365,8 @@ test('impeccable slop flags side colour accents on cards and sections', () => {
   const findings = auditImpeccableSlop(p)
   const hit = findings.find((f) => /side colour|side-tab|side color/i.test(f.title + f.detail))
   assert.ok(hit, 'expected a side-colour accent finding')
-  assert.match(hit!.detail, /do not add side colour|cards|sections/i)
-  assert.equal(hit!.severity, 'major')
+  assert.match(hit!.detail, /card|section|side-tab/i)
+  assert.equal(hit!.severity, 'minor')
 })
 
 test('soft-404 copy is detected on detail routes', () => {

@@ -6,6 +6,9 @@
   "author": "karthik",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "qualition": "./out/cli.js"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

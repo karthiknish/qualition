@@ -20,8 +20,17 @@ export interface LighthouseScores {
   seo: number | null
 }
 
+export interface LighthouseMetrics {
+  lcpMs?: number | null
+  cls?: number | null
+  tbtMs?: number | null
+  fcpMs?: number | null
+  siMs?: number | null
+}
+
 export interface LighthouseResult {
   scores: LighthouseScores
+  metrics?: LighthouseMetrics
   findings: Finding[]
   /** True when the pass could not complete (soft-fail). */
   failed?: boolean
@@ -133,6 +142,7 @@ export async function runLighthouse(
           // Qualition audits desktop product UI (not Moto G Power). Mobile
           // form-factor scoring would under/over-weight the wrong metrics.
           formFactor: 'desktop',
+          throttlingMethod: 'simulate',
           screenEmulation: {
             mobile: false,
             width: 1350,
@@ -163,6 +173,13 @@ export async function runLighthouse(
       accessibility: lhr.categories?.accessibility?.score ?? null,
       bestPractices: lhr.categories?.['best-practices']?.score ?? null,
       seo: opts.skipSeo ? null : (lhr.categories?.seo?.score ?? null)
+    }
+    const metrics: LighthouseMetrics = {
+      lcpMs: lhr.audits?.['largest-contentful-paint']?.numericValue as number | null ?? null,
+      cls: lhr.audits?.['cumulative-layout-shift']?.numericValue as number | null ?? null,
+      tbtMs: lhr.audits?.['total-blocking-time']?.numericValue as number | null ?? null,
+      fcpMs: lhr.audits?.['first-contentful-paint']?.numericValue as number | null ?? null,
+      siMs: lhr.audits?.['speed-index']?.numericValue as number | null ?? null,
     }
 
     const findings: Finding[] = []
@@ -202,7 +219,7 @@ export async function runLighthouse(
     opts.onLog?.(
       `Lighthouse: perf ${Math.round((scores.performance ?? 0) * 100)}, a11y ${Math.round((scores.accessibility ?? 0) * 100)}, best-practices ${Math.round((scores.bestPractices ?? 0) * 100)}${opts.skipSeo ? ', seo skipped (app)' : `, seo ${Math.round((scores.seo ?? 0) * 100)}`} · ${findings.length} finding(s)`
     )
-    return { scores, findings }
+    return { scores, metrics, findings }
   } catch (e) {
     const failReason = (e as Error).message.slice(0, 200)
     opts.onLog?.(`Lighthouse skipped: ${failReason}`)

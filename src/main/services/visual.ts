@@ -111,12 +111,14 @@ export async function diffScreenshots(
 /**
  * Diff this run against the most recent completed run of the same target and
  * emit findings for anything that moved more than the threshold.
+ * ignoreSelectors are hidden via data attribute before pixel diff (Chromatic parity).
  */
 export async function compareWithBaseline(
   pages: CapturedPage[],
   baseline: Run | undefined,
   assetsDir: string,
-  threshold = 0.02
+  threshold = 0.02,
+  ignoreSelectors: string[] = []
 ): Promise<{ diffs: VisualDiff[]; findings: Finding[] }> {
   const diffs: VisualDiff[] = []
   const findings: Finding[] = []
