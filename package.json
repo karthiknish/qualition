@@ -1,6 +1,6 @@
 {
   "name": "qualition",
-  "version": "0.1.28",
+  "version": "0.1.37",
   "description": "Brutal UI/UX audit desktop app — automated browser testing, Mobbin references, shadcn replacements, Gemini critique",
   "main": "./out/main/index.js",
   "author": "karthik",
