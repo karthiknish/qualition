@@ -64,6 +64,8 @@ export interface Finding {
   affectedPages?: number
   /** axe tags passthrough for filtering (wcag2a, wcag2aa, best-practice, cat.*) */
   tags?: string[]
+  /** True when from axe incomplete (needs review) */
+  incomplete?: boolean
 }
 
 export type BuildMode = 'development' | 'production' | 'unknown'
@@ -536,9 +538,22 @@ export interface RunConfig {
       minLighthouseBestPractices?: number
       minLighthouseSeo?: number
     }
+    /** Per-URL budgets (Sitespeed budget.json) */
+    budgets?: Array<{ url: string; metrics: { maxLcpMs?: number; maxCls?: number; maxTbtMs?: number; maxTransferBytes?: number; maxFcpMs?: number } }>
     /** Per-category minimum scores (0-100) */
     perCategory?: Partial<Record<Category, number>>
   }
+  /** Lighthouse formFactor / throttling parity */
+  formFactor?: 'desktop' | 'mobile'
+  throttling?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number; method?: 'simulate' | 'devtools' }
+  /** axe runOptions parity */
+  axe?: { tags?: string[]; disabledRules?: string[]; runOnly?: string[] }
+  /** Number of runs to median for flaky metrics (LHCI numberOfRuns) */
+  numberOfRuns?: number
+  /** Lighthouse onlyCategories override */
+  onlyCategories?: string[]
+  /** PWA audits */
+  includePwa?: boolean
   /** When true, skip sitemap discovery and use BFS only. */
   disableSitemap?: boolean
 }

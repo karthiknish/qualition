@@ -152,6 +152,7 @@ export interface CaptureOptions {
   baselineHtmlHashes?: Map<string, string>
   /** When true, reuse baseline page object if html hash matches (saves Playwright). */
   incrementalReuseBaseline?: Map<string, CapturedPage>
+  axe?: { tags?: string[]; disabledRules?: string[]; runOnly?: string[] }
 }
 
 export async function capturePage(
@@ -269,6 +270,16 @@ export async function capturePage(
       if (hiddenChrome > 0) {
         hiddenChromeTotal += hiddenChrome
         opts.onLog?.(`hid ${hiddenChrome} dev-chrome node(s) (Agentation etc.) on ${url}`)
+      }
+      // Mask ignoreSelectors before screenshot (visual parity)
+      if (opts.ignoreSelectors?.length) {
+        try {
+          await page.evaluate((sels: string[]) => {
+            for (const sel of sels) {
+              try { document.querySelectorAll(sel).forEach((el: any) => { el.style.visibility = 'hidden'; el.setAttribute('data-qualition-masked','1') }) } catch {}
+            }
+          }, opts.ignoreSelectors)
+        } catch {}
       }
 
       const shot = join(opts.outDir, `${slug}-${vp.name}.png`)
@@ -390,6 +401,8 @@ export async function capturePage(
 
         try {
           await hideDevChrome(page)
+          const axeTags = opts.axe?.tags ?? ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice']
+          const disabledRules: Set<string> = new Set(opts.axe?.disabledRules ?? [])
           let axeResult: {
             violations: { id: string; impact: string | null; help: string; helpUrl: string; tags?: string[]; nodes: { target: string[]; failureSummary: string }[] }[]
             incomplete: { id: string; impact: string | null; help: string; helpUrl: string; tags?: string[]; nodes: { target: string[]; failureSummary: string }[] }[]
@@ -399,7 +412,7 @@ export async function capturePage(
               `axe ${url}`,
               2,
               async () => {
-                let builder = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice'])
+                let builder = new AxeBuilder({ page }).withTags(axeTags as any)
                 for (const sel of DEV_CHROME_EXCLUDE_LIST) {
                   try {
                     builder = builder.exclude(sel)
@@ -428,8 +441,9 @@ export async function capturePage(
               }))
             }
           }
-          axe = ((result as { violations?: unknown[] })?.violations ?? []).map((v) => mapViol(v, false))
-          axeIncomplete = ((result as { incomplete?: unknown[] })?.incomplete ?? []).slice(0, 12).map((v) => mapViol(v, true))
+          axe = ((result as { violations?: unknown[] })?.violations ?? []).map((v) => mapViol(v, false)).filter(v => !disabledRules.has(v.id))
+          if (opts.axe?.runOnly?.length) axe = axe.filter(v => opts.axe!.runOnly!.includes(v.id))
+          axeIncomplete = ((result as { incomplete?: unknown[] })?.incomplete ?? []).slice(0, 12).map((v) => mapViol(v, true)).filter(v => !disabledRules.has(v.id))
           if (axeIncomplete.length) opts.onLog?.(`axe incomplete (needs review): ${axeIncomplete.map((v) => v.id).join(', ')}`)
         } catch (e) {
           const msg = (e as Error).message.slice(0, 200)

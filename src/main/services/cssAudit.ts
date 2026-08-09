@@ -345,6 +345,18 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
     )
   }
 
+  // Wallace duplications & complexity specifics
+  for (const v of stats.qualityViolations) {
+    if (/Duplication/i.test(v.id) && Number(v.score) < 70) {
+      out.push(mk(page,'coherence', Number(v.score)<40?'major':'minor', `CSS ${v.id}: ${v.value ?? ''}`, `Wallace guard ${v.id} score ${v.score}.${note}`, 'Deduplicate selectors/declarations.'))
+      break
+    }
+  }
+  if (stats.rules > 0 && (stats as any).avgSelectorsPerRule != null) {
+    const avg = Number((stats as any).avgSelectorsPerRule)
+    if (avg > 3) out.push(mk(page,'coherence','minor', `Avg ${avg.toFixed(1)} selectors per rule`, `Over-qualified lists.${note}`, 'Flatten selector lists.'))
+  }
+
   const q = stats.quality
   if (q.maintainability < 70 || q.complexity < 70 || q.performance < 70) {
     out.push(

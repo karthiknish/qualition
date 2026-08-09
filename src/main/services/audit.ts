@@ -565,6 +565,7 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
       source: 'axe',
       provenance: provenanceForSelector(selector),
       tags: v.tags,
+      incomplete: true,
       effort: 'one-line',
       confidence: 'low'
     })

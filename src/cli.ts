@@ -30,8 +30,10 @@ Usage:
 
 Options:
   --site <url>          Target to audit (required)
-  --budget <path>       budget.json with { "minScore": 80, "maxFindings": { "blocker": 0 } }
+  --budget <path>       budget.json with { "minScore": 80, "maxFindings": { "blocker": 0 }, "metrics": {...}, "budgets": [{url:"/pricing",metrics:{maxLcpMs:2500}}] }
   --maxPages <n>        Pages to crawl (default 5, 0 = unlimited with 45m cap)
+  --iterations <n>      Lighthouse / metric runs to median (1-5, default 1)
+  --formFactor <mode>   desktop | mobile (default desktop)
   --out <dir>           Output dir for run.json + report.html + results.sarif (default ./qualition-report)
   --format <list>       Comma list: json,html,sarif,markdown (default json,html,sarif)
   --diff <mode>         full | changed-only (requires prior run in same project dir; default full)
@@ -53,6 +55,8 @@ async function main(): Promise<void> {
   }
   const outDir = (args.out as string) || './qualition-report'
   const maxPages = args.maxPages ? Number(args.maxPages) : 5
+  const iterations = Math.max(1, Math.min(5, Number(args.iterations ?? 1) || 1))
+  const formFactor = (args.formFactor as string) === 'mobile' ? 'mobile' as const : 'desktop' as const
   const diffMode = (args.diff as string) === 'changed-only' ? 'changed-only' as const : 'full' as const
   const format = ((args.format as string) || 'json,html,sarif').split(',').map((s) => s.trim().toLowerCase())
   const budgetPath = (args.budget as string) || null
@@ -75,9 +79,15 @@ async function main(): Promise<void> {
   })
   await browser.close().catch(() => {})
   console.log(`captured ${pages.length} page(s)`)
+  // Lighthouse in CLI (optional, best-effort)
+  let lh: any = null
+  try {
+    const { runLighthouse } = await import('./main/services/lighthouse.js')
+    lh = await runLighthouse(pages[0]?.url ?? site, { formFactor, runs: iterations, onLog: (m:string)=>console.log(`  lh ${m}`) })
+    if (lh?.scores) console.log(`lighthouse perf ${Math.round((lh.scores.performance??0)*100)} a11y ${Math.round((lh.scores.accessibility??0)*100)}`)
+  } catch (e) { console.log(`lighthouse skipped: ${(e as Error).message.slice(0,120)}`) }
 
-  // Lightweight in-process audit (no Mobbin/Gemini/Lighthouse in CLI v1)
-  const cfg = { targetUrl: site, brutality: 'ruthless' as const, viewports: DEFAULT_VIEWPORTS } as never
+  const cfg = { targetUrl: site, brutality: 'ruthless' as const, viewports: DEFAULT_VIEWPORTS, formFactor, numberOfRuns: iterations } as never
   const findings: unknown[] = []
   for (const p of pages) {
     const { auditPage: ap } = await import('./main/services/audit.js')
@@ -98,8 +108,9 @@ async function main(): Promise<void> {
   const brand = brandMod.inferBrandProfile(pages as never, '')
   for (const p of pages) findings.push(...brandMod.auditComponentTheme(p as never, brand, cfg))
   findings.push(...brandMod.auditBrandAcrossProject(pages as never, brand, cfg))
+  if (lh?.findings?.length) findings.push(...lh.findings)
   const deduped = dedupeFindings(findings as never)
-  const score = scoreRun(deduped as never, pages.length, 'ruthless')
+  const score = scoreRun(deduped as never, pages.length, 'ruthless', lh?.scores ? { performance: lh.scores.performance } : undefined)
 
   const run = {
     id: `cli-${Date.now()}`,
@@ -130,11 +141,14 @@ async function main(): Promise<void> {
 
   console.log(`done: grade ${score.grade} (${score.overall}/100) · ${deduped.length} findings`)
 
-  // Budget gate
+  // Budget gate (global + perURL + metrics + lighthouse)
   if (budgetPath) {
     try {
       const raw = JSON.parse(await (await import('node:fs/promises')).readFile(budgetPath, 'utf8'))
       let failed = false
+      const check = (label:string, actual:number, max:number) => {
+        if (actual > max) { console.error(`budget failed: ${label} ${actual} > ${max}`); failed=true }
+      }
       if (typeof raw.minScore === 'number' && score.overall < raw.minScore) {
         console.error(`budget failed: overall ${score.overall} < minScore ${raw.minScore}`)
         failed = true
@@ -146,6 +160,23 @@ async function main(): Promise<void> {
             console.error(`budget failed: ${sev} findings ${n} > ${max}`)
             failed = true
           }
+        }
+      }
+      if (raw.metrics) {
+        const aggLcp = Math.max(...pages.map((p:any)=>p.metrics?.lcpMs ?? 0))
+        if (raw.metrics.maxLcpMs != null) check('LCP', aggLcp, raw.metrics.maxLcpMs)
+        if (raw.metrics.maxCls != null) check('CLS', Math.max(...pages.map((p:any)=>p.metrics?.cls ?? 0)), raw.metrics.maxCls)
+        if (raw.metrics.minLighthousePerformance != null && lh?.scores?.performance != null) {
+          const perf = Math.round(lh.scores.performance*100)
+          if (perf < raw.metrics.minLighthousePerformance) { console.error(`budget failed: LH perf ${perf} < ${raw.metrics.minLighthousePerformance}`); failed=true }
+        }
+      }
+      if (Array.isArray(raw.budgets)) {
+        for (const b of raw.budgets as Array<{url:string, metrics: Record<string,number>}>) {
+          try { const re=new RegExp(b.url); for (const p of pages as any[]) if (re.test(p.url)) {
+            if (b.metrics.maxLcpMs != null) check(`${p.url} LCP`, p.metrics.lcpMs ?? 0, b.metrics.maxLcpMs)
+            if (b.metrics.maxCls != null) check(`${p.url} CLS`, p.metrics.cls ?? 0, b.metrics.maxCls)
+          } } catch {}
         }
       }
       if (failed) process.exit(1)

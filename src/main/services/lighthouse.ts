@@ -18,6 +18,7 @@ export interface LighthouseScores {
   accessibility: number | null
   bestPractices: number | null
   seo: number | null
+  pwa?: number | null
 }
 
 export interface LighthouseMetrics {
@@ -92,8 +93,12 @@ export async function runLighthouse(
   url: string,
   opts: {
     storageStatePath?: string
-    /** Skip SEO category for signed-in product UIs (marketing SEO does not apply). */
     skipSeo?: boolean
+    includePwa?: boolean
+    formFactor?: 'desktop' | 'mobile'
+    onlyCategories?: string[]
+    throttling?: { rttMs?: number; throughputKbps?: number; cpuSlowdownMultiplier?: number; method?: 'simulate' | 'devtools' }
+    runs?: number
     onLog?: (m: string) => void
   } = {}
 ): Promise<LighthouseResult | null> {
@@ -124,11 +129,18 @@ export async function runLighthouse(
       )
     }
 
-    const categories = opts.skipSeo
-      ? ['performance', 'accessibility', 'best-practices']
-      : ['performance', 'accessibility', 'best-practices', 'seo']
+    let categories: string[] | undefined = opts.onlyCategories
+    if (!categories) {
+      categories = opts.skipSeo ? ['performance', 'accessibility', 'best-practices'] : ['performance', 'accessibility', 'best-practices', 'seo']
+      if (opts.includePwa) categories.push('pwa')
+    }
 
-    const runnerResult = await lighthouse(
+    // median over runs
+    const runs = Math.max(1, Math.min(5, opts.runs ?? 1))
+    const collected: any[] = []
+    let lastRunner: any = null
+    for (let r=0; r<runs; r++) {
+      const rr = await lighthouse(
       url,
       {
         port: chrome!.port,
@@ -139,25 +151,33 @@ export async function runLighthouse(
       {
         extends: 'lighthouse:default',
         settings: {
-          // Qualition audits desktop product UI (not Moto G Power). Mobile
-          // form-factor scoring would under/over-weight the wrong metrics.
-          formFactor: 'desktop',
-          throttlingMethod: 'simulate',
-          screenEmulation: {
+          formFactor: opts.formFactor ?? 'desktop',
+          throttlingMethod: opts.throttling?.method ?? 'simulate',
+          ...(opts.throttling?.rttMs || opts.throttling?.throughputKbps ? { throttling: { rttMs: opts.throttling.rttMs ?? 40, throughputKbps: opts.throttling.throughputKbps ?? 10240, cpuSlowdownMultiplier: opts.throttling.cpuSlowdownMultiplier ?? 1 } } : {}),
+          screenEmulation: opts.formFactor === 'mobile' ? { mobile: true, width: 360, height: 640, deviceScaleFactor: 2, disabled: false } : {
             mobile: false,
             width: 1350,
             height: 940,
             deviceScaleFactor: 1,
             disabled: false
           },
-          emulatedUserAgent:
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          emulatedUserAgent: opts.formFactor === 'mobile' ? 'Mozilla/5.0 (Linux; Android 11; moto g power) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' : 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
           onlyCategories: categories,
           maxWaitForLoad: 45_000,
           disableStorageReset: !!opts.storageStatePath
         }
       }
     )
+      collected.push(rr)
+      lastRunner = rr
+      if (runs > 1) opts.onLog?.(`Lighthouse run ${r+1}/${runs} done`)
+    }
+    const runnerResult = collected.length>1 ? (()=>{ // median by performance score
+      const scores = collected.map(c=> c.lhr?.categories?.performance?.score ?? 0)
+      const sorted = [...scores].sort((a,b)=>a-b)
+      const med = sorted[Math.floor(sorted.length/2)]
+      return collected.find(c=> (c.lhr?.categories?.performance?.score ?? 0)===med) ?? lastRunner
+    })() : lastRunner
     const lhr = runnerResult?.lhr
     if (!lhr) {
       return {
@@ -172,7 +192,8 @@ export async function runLighthouse(
       performance: lhr.categories?.performance?.score ?? null,
       accessibility: lhr.categories?.accessibility?.score ?? null,
       bestPractices: lhr.categories?.['best-practices']?.score ?? null,
-      seo: opts.skipSeo ? null : (lhr.categories?.seo?.score ?? null)
+      seo: opts.skipSeo ? null : (lhr.categories?.seo?.score ?? null),
+      pwa: opts.includePwa ? (lhr.categories?.pwa?.score ?? null) : null
     }
     const metrics: LighthouseMetrics = {
       lcpMs: lhr.audits?.['largest-contentful-paint']?.numericValue as number | null ?? null,

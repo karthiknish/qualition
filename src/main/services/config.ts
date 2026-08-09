@@ -28,6 +28,7 @@ export interface QualitionRc {
       minLighthouseBestPractices?: number
       minLighthouseSeo?: number
     }
+    budgets?: Array<{ url: string; metrics: Record<string, number> }>
     perCategory?: Record<string, number>
   }
   /** Reference branch/commit overrides (Argos/Percy parity: ARGOS_REFERENCE_BRANCH etc.). */
@@ -36,6 +37,10 @@ export interface QualitionRc {
   approvals?: { autoApprove?: boolean; autoApproveBranches?: string[] }
   /** Number of runs to median for flaky metrics (LHCI numberOfRuns). */
   runs?: { numberOfRuns?: number }
+  /** Visual antialias toggle */
+  antialias?: boolean
+  /** Form factor */
+  formFactor?: 'desktop' | 'mobile'
 }
 
 const RC_NAMES = ['.qualitionrc.json', '.qualitionrc', 'qualition.config.json']

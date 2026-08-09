@@ -2,8 +2,17 @@
   "disableCategories": [],
   "ignoreTitles": ["purple palette as primary"],
   "thresholds": { "visualDiffThreshold": 0.02 },
-  "visual": { "diffThreshold": 0.02, "ignoreSelectors": [".chromatic-ignore", "[data-qualition-ignore]"] },
+  "visual": { "diffThreshold": 0.02, "ignoreSelectors": [".chromatic-ignore", "[data-qualition-ignore]"], "antialias": true },
+  "runs": { "numberOfRuns": 3 },
+  "formFactor": "desktop",
   "baseline": { "referenceBranch": "main" },
   "approvals": { "autoApprove": true, "autoApproveBranches": ["main"] },
-  "budgets": { "minScore": 60, "maxFindings": { "blocker": 0, "critical": 2 } }
+  "budgets": {
+    "minScore": 60,
+    "maxFindings": { "blocker": 0, "critical": 2 },
+    "metrics": { "maxLcpMs": 2500, "maxCls": 0.1, "minLighthousePerformance": 80 },
+    "budgets": [{ "url": "/pricing", "metrics": { "maxLcpMs": 2000 } }],
+    "perCategory": { "performance": 70, "accessibility": 80 }
+  },
+  "axe": { "disabledRules": ["region"], "tags": ["wcag2a", "wcag2aa", "best-practice"] }
 }

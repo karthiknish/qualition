@@ -23,13 +23,14 @@ async function readPng(path: string): Promise<PNG | null> {
 async function diffWithOdiff(
   baselinePath: string,
   currentPath: string,
-  diffPath: string
+  diffPath: string,
+  opts: { threshold?: number; antialiasing?: boolean } = {}
 ): Promise<{ changedRatio: number; changedPixels: number; diffImage?: string } | null> {
   try {
     const { compare } = await import('odiff-bin')
     const result = await compare(baselinePath, currentPath, diffPath, {
-      threshold: 0.12,
-      antialiasing: true,
+      threshold: opts.threshold ?? 0.12,
+      antialiasing: opts.antialiasing ?? true,
       // Full-page shots often differ in height; still compare overlapping pixels
       // instead of immediately falling back (docs: failOnLayoutDiff default true).
       failOnLayoutDiff: false,
@@ -60,7 +61,8 @@ async function diffWithOdiff(
 async function diffWithPixelmatch(
   baselinePath: string,
   currentPath: string,
-  diffPath: string
+  diffPath: string,
+  opts: { threshold?: number; antialiasing?: boolean } = {}
 ): Promise<{ changedRatio: number; changedPixels: number; diffImage?: string } | null> {
   const [a, b] = await Promise.all([readPng(baselinePath), readPng(currentPath)])
   if (!a || !b) return null
@@ -80,8 +82,8 @@ async function diffWithPixelmatch(
   const diff = new PNG({ width, height })
 
   const changedPixels = pixelmatch(A.data, B.data, diff.data, width, height, {
-    threshold: 0.12,
-    includeAA: false,
+    threshold: opts.threshold ?? 0.12,
+    includeAA: opts.antialiasing ? true : false,
     alpha: 0.4
   })
   const heightDelta = Math.abs(a.height - b.height) * width
@@ -100,12 +102,13 @@ async function diffWithPixelmatch(
 export async function diffScreenshots(
   baselinePath: string,
   currentPath: string,
-  diffPath: string
+  diffPath: string,
+  opts: { threshold?: number; antialiasing?: boolean } = {}
 ): Promise<{ changedRatio: number; changedPixels: number; diffImage?: string } | null> {
   // odiff first — orders of magnitude faster on large screenshots.
-  const odiff = await diffWithOdiff(baselinePath, currentPath, diffPath)
+  const odiff = await diffWithOdiff(baselinePath, currentPath, diffPath, opts)
   if (odiff) return odiff
-  return diffWithPixelmatch(baselinePath, currentPath, diffPath)
+  return diffWithPixelmatch(baselinePath, currentPath, diffPath, opts)
 }
 
 /**
@@ -118,7 +121,8 @@ export async function compareWithBaseline(
   baseline: Run | undefined,
   assetsDir: string,
   threshold = 0.02,
-  ignoreSelectors: string[] = []
+  ignoreSelectors: string[] = [],
+  opts: { thresholdPx?: number; antialiasing?: boolean } = {}
 ): Promise<{ diffs: VisualDiff[]; findings: Finding[] }> {
   const diffs: VisualDiff[] = []
   const findings: Finding[] = []
@@ -144,7 +148,7 @@ export async function compareWithBaseline(
       const baseShot = before.screenshots[vp]
       if (!baseShot) continue
       const diffPath = join(assetsDir, `diff-${vp}-${n++}.png`)
-      const res = await diffScreenshots(baseShot, current, diffPath)
+      const res = await diffScreenshots(baseShot, current, diffPath, { threshold: opts.thresholdPx, antialiasing: opts.antialiasing })
       if (!res) continue
       const diff: VisualDiff = {
         url: page.url,

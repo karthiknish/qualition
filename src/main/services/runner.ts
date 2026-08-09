@@ -258,10 +258,10 @@ export async function executeRun(
     )
     // Git context for branch-aware baseline (Argos/Chromatic parity)
     run.git = {
-      branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || process.env.GIT_BRANCH || undefined,
-      sha: process.env.GITHUB_SHA || process.env.GIT_COMMIT || undefined,
-      baseSha: process.env.GITHUB_BASE_SHA || undefined,
-      baseBranch: process.env.GITHUB_BASE_REF || undefined
+      branch: process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || process.env.GIT_BRANCH || process.env.PERCY_BRANCH || process.env.CHROMATIC_BRANCH || process.env.VERCEL_GIT_COMMIT_REF || process.env.CI_COMMIT_REF_NAME || undefined,
+      sha: process.env.GITHUB_SHA || process.env.GIT_COMMIT || process.env.VERCEL_GIT_COMMIT_SHA || undefined,
+      baseSha: process.env.GITHUB_BASE_SHA || process.env.GITLAB_BASE_SHA || undefined,
+      baseBranch: process.env.GITHUB_BASE_REF || process.env.ARGOS_REFERENCE_BRANCH || process.env.PERCY_TARGET_BRANCH || process.env.LOST_PIXEL_BASE_BRANCH || undefined
     }
     if (!run.git.branch) delete run.git.branch
     if (!run.git.sha) delete run.git.sha
@@ -315,6 +315,7 @@ export async function executeRun(
       ignoreSelectors: crawlIgnoreSelectors,
       baselineHtmlHashes: incrementalHashes,
       incrementalReuseBaseline: incrementalReuse,
+      axe: cfg.axe,
       onPage: (p) => {
         run.pages.push(p)
         progress(
@@ -442,7 +443,7 @@ export async function executeRun(
           if (sameBranch) return sameBranch
         }
         // Respect referenceBranch override (Argos/Percy parity)
-        const refBranch = rcForVisual?.baseline?.referenceBranch || process.env.ARGOS_REFERENCE_BRANCH || process.env.PERCY_TARGET_BRANCH
+        const refBranch = rcForVisual?.baseline?.referenceBranch || process.env.ARGOS_REFERENCE_BRANCH || process.env.PERCY_TARGET_BRANCH || process.env.CHROMATIC_BRANCH || process.env.VERCEL_GIT_COMMIT_REF
         if (refBranch) {
           const ref = all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false && r.git?.branch === refBranch)
           if (ref) return ref
@@ -450,15 +451,18 @@ export async function executeRun(
         return all.find((r) => r.id !== run.id && r.status === 'done' && r.approved !== false) ?? null
       })()
 
+      const rcRuns = rcForVisual?.runs?.numberOfRuns ?? (cfg as any).numberOfRuns
+      const lhRuns = Math.max(1, Math.min(5, Number(rcRuns) || 1))
+      const lhFormFactor = (cfg as any).formFactor ?? rcForVisual?.formFactor ?? 'desktop'
+      const lhThrottling = (cfg as any).throttling
+      const lhOnlyCats = (cfg as any).onlyCategories
+      const lhIncludePwa = !!(cfg as any).includePwa
+      // multi-page lighthouse: primary + 2 more for median per-site view
+      const lhTargets = [primary, ...run.pages.slice(1,3).map(p=>p.url)]
       const [lhSettled, pa11ySettled, visualSettled] = await Promise.all([
         lighthouseOn
-          ? raceCancel(
-              runLighthouse(primary, {
-                storageStatePath: storageState,
-                skipSeo,
-                onLog: (m) => log('info', m)
-              })
-            )
+          ? raceCancel((async()=>{ const outs: any[]=[]; for (const u of lhTargets.slice(0, lhTargets.length>1?2:1)) { const r = await runLighthouse(u, { storageStatePath: storageState, skipSeo, includePwa: lhIncludePwa, formFactor: lhFormFactor, onlyCategories: lhOnlyCats, throttling: lhThrottling, runs: lhRuns, onLog: (m)=>log('info', m)}) ; if(r) outs.push(r)}; if(outs.length>1){ // merge: worst perf
+                  const worst = outs.sort((a,b)=> (a.scores.performance??1)-(b.scores.performance??1))[0]; worst.findings = outs.flatMap(o=>o.findings); return worst } return outs[0] ?? null })())
               .then((v) => ({ ok: true as const, v, skipped: false as const }))
               .catch((e) => ({ ok: false as const, e, skipped: false as const }))
           : Promise.resolve({ ok: true as const, v: null, skipped: true as const }),
@@ -474,7 +478,8 @@ export async function executeRun(
         previousPromise
           .then(async (previous) => {
             if (!previous) return { ok: true as const, previous: null, diffs: null }
-            const result = await compareWithBaseline(run.pages, previous, assets, visualThreshold ?? 0.02, visualIgnoreSelectors)
+            const antialias = rcForVisual?.antialias ?? true
+            const result = await compareWithBaseline(run.pages, previous, assets, visualThreshold ?? 0.02, visualIgnoreSelectors, { thresholdPx: 0.12, antialiasing: antialias })
             return { ok: true as const, previous, diffs: result }
           })
           .catch((e) => ({ ok: false as const, e }))
@@ -1199,8 +1204,9 @@ export async function executeRun(
       const { loadQualitionRc } = await import('./config.js')
       const { rc } = await loadQualitionRc()
       const budgets = (cfg.budgets as any) ?? rc?.budgets ?? null
-      if (budgets?.metrics) {
-        const mMetrics = budgets.metrics as Record<string, number>
+      if (budgets?.metrics || budgets?.budgets) {
+        const mMetrics = (budgets.metrics ?? {}) as Record<string, number>
+        const perUrl: Array<{url:string, metrics: Record<string, number>}> = budgets.budgets ?? []
         const aggLcp = Math.max(...run.pages.map(p => p.metrics.lcpMs ?? 0))
         const aggCls = Math.max(...run.pages.map(p => p.metrics.cls ?? 0))
         const aggTbt = Math.max(...run.pages.map(p => (p.metrics as any).tbtMs ?? p.metrics.longTaskMs ?? 0))
@@ -1214,6 +1220,17 @@ export async function executeRun(
         if (mMetrics.maxFcpMs != null && aggFcp > mMetrics.maxFcpMs) violations.push(`FCP ${aggFcp}ms > budget ${mMetrics.maxFcpMs}ms`)
         if (mMetrics.maxTransferBytes != null && aggBytes > mMetrics.maxTransferBytes) violations.push(`transfer ${aggBytes}B > budget ${mMetrics.maxTransferBytes}B`)
         if (mMetrics.minLighthousePerformance != null && lhPerf != null && lhPerf < mMetrics.minLighthousePerformance) violations.push(`Lighthouse perf ${lhPerf} < budget ${mMetrics.minLighthousePerformance}`)
+        for (const b of perUrl) {
+          try {
+            const re = new RegExp(b.url)
+            for (const p of run.pages) if (re.test(p.url)) {
+              const mm = b.metrics
+              if (mm.maxLcpMs != null && (p.metrics.lcpMs ?? 0) > mm.maxLcpMs) violations.push(`${p.url} LCP ${p.metrics.lcpMs} > ${mm.maxLcpMs}`)
+              if (mm.maxCls != null && (p.metrics.cls ?? 0) > mm.maxCls) violations.push(`${p.url} CLS ${p.metrics.cls} > ${mm.maxCls}`)
+              if (mm.maxTransferBytes != null && p.metrics.transferBytes > mm.maxTransferBytes) violations.push(`${p.url} bytes ${p.metrics.transferBytes} > ${mm.maxTransferBytes}`)
+            }
+          } catch {}
+        }
         if (violations.length) {
           log('warn', `Budget violations: ${violations.join('; ')}`)
           for (const v of violations) {
