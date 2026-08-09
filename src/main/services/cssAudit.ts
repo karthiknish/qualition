@@ -99,8 +99,8 @@ export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions 
 
   const av = a as {
     stylesheet?: { size?: number }
-    rules?: { total?: number }
-    selectors?: { total?: number; specificity?: { max?: unknown[] }; id?: { ratio?: number }; browserhacks?: { total?: number } }
+    rules?: { total?: number; empty?: { ratio?: number } }
+    selectors?: { total?: number; specificity?: { max?: unknown[] }; id?: { ratio?: number }; browserhacks?: { total?: number }; complexity?: { mean?: number; max?: number } }
     declarations?: { importants?: { ratio?: number } }
     values?: {
       colors?: { total?: number; totalUnique?: number; uniquenessRatio?: number }
@@ -111,9 +111,10 @@ export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions 
       zindexes?: { totalUnique?: number; unique?: Record<string, unknown> }
       browserhacks?: { total?: number }
       prefixes?: { total?: number }
+      units?: { total?: number; totalUnique?: number; unique?: Record<string, number>; itemsPerContext?: Record<string, { unique?: Record<string, number> }> }
     }
     properties?: { custom?: { total?: number; unused?: unknown[] }; prefixed?: { total?: number } }
-    atrules?: { media?: { total?: number } }
+    atrules?: { media?: { total?: number }; layer?: { total?: number }; container?: { total?: number }; supports?: { total?: number } }
   }
   const custom = av.properties?.custom ?? {}
   const zi = av.values?.zindexes ?? {}
@@ -127,6 +128,16 @@ export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions 
   const bytes = attr?.totalBytes ?? trueBytes
   const sheetTotal = attr ? attr.appSheets + attr.frameworkSheets + attr.vendorSheets : sheets
 
+  // Wallace expanded: units, complexity, atrules
+  const units = av.values?.units
+  let unitsByProperty: Record<string, Record<string, number>> | undefined
+  if (units?.itemsPerContext) {
+    unitsByProperty = {}
+    for (const [prop, ctx] of Object.entries(units.itemsPerContext as Record<string, any>)) {
+      if (ctx?.unique) unitsByProperty[prop] = ctx.unique as Record<string, number>
+    }
+    if (Object.keys(unitsByProperty).length === 0) unitsByProperty = undefined
+  }
   const result: CssStats = {
     bytes,
     sheets: sheetTotal || sheets,
@@ -149,6 +160,15 @@ export function analyzeCss(css: string, sheets: number, opts: AnalyzeCssOptions 
     customPropsDefined: num(custom.total),
     customPropsUnused: Array.isArray(custom.unused) ? custom.unused.length : 0,
     mediaQueries: num(av.atrules?.media?.total),
+    unitsTotal: units ? num(units.total) : undefined,
+    unitsUnique: units ? num(units.totalUnique) : undefined,
+    unitsByProperty,
+    selectorsComplexityMean: av.selectors?.complexity?.mean != null ? Number(av.selectors.complexity.mean) : undefined,
+    selectorsComplexityMax: av.selectors?.complexity?.max != null ? Number(av.selectors.complexity.max) : undefined,
+    atrulesLayer: num(av.atrules?.layer?.total) || undefined,
+    atrulesContainer: num(av.atrules?.container?.total) || undefined,
+    atrulesSupports: num(av.atrules?.supports?.total) || undefined,
+    rulesEmptyRatio: av.rules?.empty?.ratio != null ? Number(av.rules.empty.ratio) : undefined,
     quality,
     qualityViolations,
     locations: locateCssIssues(css),
@@ -345,6 +365,28 @@ export function auditCss(page: CapturedPage, stats: CssStats, config: RunConfig)
     )
   }
 
+  // Wallace expanded signals
+  // Units sprawl: many distinct units or mixing px/rem/em per property
+  if (stats.unitsUnique != null && stats.unitsUnique >= 5 && (stats.unitsTotal ?? 0) > 20) {
+    const unitKeys = stats.unitsByProperty ? Object.entries(stats.unitsByProperty).filter(([, u]) => Object.keys(u).length > 1).slice(0, 3).map(([prop, u]) => `${prop} (${Object.keys(u).join('/')})`).join(', ') : ''
+    out.push(mk(page, 'coherence', stats.unitsUnique >= 7 ? 'minor' : 'nit', `${stats.unitsUnique} CSS units mixed (${stats.unitsTotal} uses)`, `Units in use span multiple systems${unitKeys ? `: ${unitKeys}` : ''}. Mixing px/rem/em/vw without a system makes sizing unpredictable.${note}`, 'Standardize on rem for type/spacing, px for borders, and %/vw only where fluid.'))
+  }
+  // Selector complexity
+  if (stats.selectorsComplexityMax != null && stats.selectorsComplexityMax >= 4) {
+    out.push(mk(page, 'coherence', stats.selectorsComplexityMax >= 6 ? 'major' : 'minor', `Selector complexity peaks at ${stats.selectorsComplexityMax} (mean ${stats.selectorsComplexityMean?.toFixed(1) ?? '?'})`, `Wallace complexity counts combinators + pseudo complexity. High peaks mean brittle, over-qualified selectors.${note}`, 'Flatten selectors to single class where possible; use :where() to lower specificity without changing structure.'))
+  } else if (stats.selectorsComplexityMean != null && stats.selectorsComplexityMean > 2.2) {
+    out.push(mk(page, 'coherence', 'nit', `Mean selector complexity ${stats.selectorsComplexityMean.toFixed(1)}`, `Moderately complex selectors across the sheet.${note}`, 'Prefer flat class selectors.'))
+  }
+  // @layer / @container adoption
+  if ((stats.atrulesLayer ?? 0) === 0 && stats.rules > 300 && strict > 0.6) {
+    out.push(mk(page, 'craft', 'nit', `No @layer usage in ${stats.rules} rules`, `Modern cascade layering not adopted — ordering relies on source order.${note}`, 'Consider @layer for reset/base/components/utilities to make overrides predictable.'))
+  }
+  if ((stats.atrulesContainer ?? 0) > 0 && (stats.atrulesContainer ?? 0) < 3) {
+    // container queries present but sparse — not necessarily bad, just note
+  }
+  if (stats.rulesEmptyRatio != null && stats.rulesEmptyRatio > 0.05) {
+    out.push(mk(page, 'coherence', 'nit', `${(stats.rulesEmptyRatio * 100).toFixed(1)}% empty rules`, `Empty rules bloat the sheet and signal generated dead code.${note}`, 'Purge empty rules from the build.'))
+  }
   // Wallace duplications & complexity specifics
   for (const v of stats.qualityViolations) {
     if (/Duplication/i.test(v.id) && Number(v.score) < 70) {

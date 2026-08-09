@@ -728,6 +728,19 @@ export function auditPage(page: CapturedPage, config: RunConfig): Finding[] {
   } else if (m.longTaskMs > 800) {
     out.push(mk(page, 'performance', softPerf('minor'), `${m.longTaskMs}ms of long tasks${devBuild ? ' (dev)' : ''}`, `The main thread is blocked, so early clicks feel dead.${perfSuffix}`, 'Split bundles, defer non-critical work, hydrate progressively.', { confidence: devBuild ? 'low' : 'high' }))
   }
+  // INP: median 200ms good, p10 500ms poor (Core Web Vital since Mar 2024)
+  const inp = (m as any).inpMs as number | null | undefined
+  if (inp != null && inp > 0) {
+    const s = logNormalScore(inp, 200, 500)
+    if (s < 0.9 || inp > 200) {
+      const sev: Severity = inp > 500 ? 'critical' : inp > 200 ? 'major' : s < 0.5 ? 'minor' : 'nit'
+      if (inp > 200 || s < 0.9) out.push(mk(page, 'performance', softPerf(sev), `INP ${Math.round(inp)}ms${devBuild ? ' (dev)' : ''} (score ${(s*100)|0})`, `Interaction to Next Paint above the 200ms "good" threshold (LoAF-aware). Long tasks: ${m.longTaskMs}ms.${perfSuffix}`, 'Reduce input delay: break up long tasks, avoid main-thread work on interaction.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
+    }
+  }
+  // Speed Index if significantly worse than FCP
+  if ((m as any).fcpMs != null) {
+    // SI is scored via Lighthouse metrics elsewhere; lightweight note here only if SI available via lighthouse blend
+  }
   if (m.transferBytes > 3_500_000) {
     out.push(mk(page, 'performance', softPerf('major'), `${(m.transferBytes / 1e6).toFixed(1)} MB transferred${devBuild ? ' (dev)' : ''}`, `${m.requestCount} requests.${perfSuffix}`, 'Compress and lazy-load below-the-fold media; audit the JS bundle.', { effort: 'component', confidence: devBuild ? 'low' : 'high' }))
   }

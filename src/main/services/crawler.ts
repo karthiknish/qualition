@@ -443,6 +443,8 @@ export async function capturePage(
           await hideDevChrome(page)
           const baseTags = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22a', 'wcag22aa', 'best-practice']
           const aaa = (opts.axe as any)?.level === 'AAA' ? ['wcag2aaa'] : []
+          const rgaa = (opts.axe as any)?.tags?.includes('RGAAv4') || (opts.axe as any)?.tags?.includes('rgaa') ? [] : []
+          // RGAAv4 tags are pass-through when user explicitly requests them via tags filter (axe 4.11+)
           const axeTags = opts.axe?.tags ?? [...baseTags, ...aaa]
           const disabledRules: Set<string> = new Set(opts.axe?.disabledRules ?? [])
           let axeResult: {

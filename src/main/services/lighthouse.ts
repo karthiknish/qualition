@@ -27,6 +27,9 @@ export interface LighthouseMetrics {
   tbtMs?: number | null
   fcpMs?: number | null
   siMs?: number | null
+  inpMs?: number | null
+  ttfbMs?: number | null
+  lcpPhases?: { ttfb?: number; loadDelay?: number; loadTime?: number; renderDelay?: number } | null
 }
 
 export interface LighthouseResult {
@@ -38,27 +41,45 @@ export interface LighthouseResult {
   failReason?: string
 }
 
-/** Audits worth surfacing; the rest is noise at this level. */
+/** Audits worth surfacing; dual legacy + Lighthouse 13 insights (Oct 2025). */
 const INTERESTING = new Set([
+  // legacy perf — still valid under Diagnostics
   'render-blocking-resources',
   'unused-javascript',
   'unused-css-rules',
   'unminified-javascript',
   'unminified-css',
-  'modern-image-formats',
-  'uses-optimized-images',
-  'uses-responsive-images',
-  'efficient-animated-content',
   'total-byte-weight',
   'dom-size',
   'bootup-time',
   'mainthread-work-breakdown',
-  'third-party-summary',
   'legacy-javascript',
   'font-display',
+  // legacy images → consolidated into image-delivery-insight in LH13
+  'modern-image-formats',
+  'uses-optimized-images',
+  'uses-responsive-images',
+  'efficient-animated-content',
+  // legacy network → document-latency-insight in LH13
   'server-response-time',
   'redirects',
   'uses-text-compression',
+  // legacy third-party → third-parties-insight
+  'third-party-summary',
+  // LH13 insights
+  'image-delivery-insight',
+  'third-parties-insight',
+  'document-latency-insight',
+  'lcp-discovery-insight',
+  'lcp-phases-insight',
+  'interaction-to-next-paint-insight',
+  'cls-culprits-insight',
+  'render-blocking-insight',
+  'network-dependency-tree-insight',
+  'duplicated-javascript-insight',
+  'viewport-insight',
+  'font-display-insight',
+  // seo / best-practices
   'is-crawlable',
   'document-title',
   'meta-description',
@@ -195,12 +216,46 @@ export async function runLighthouse(
       seo: opts.skipSeo ? null : (lhr.categories?.seo?.score ?? null),
       pwa: opts.includePwa ? (lhr.categories?.pwa?.score ?? null) : null
     }
+    // Extract metrics with LH13 insight fallbacks (legacy ids may be absent)
+    const auditNum = (id: string): number | null => {
+      const v = lhr.audits?.[id]?.numericValue
+      return typeof v === 'number' && Number.isFinite(v) ? v : null
+    }
+    const insightDetail = (id: string): any => lhr.audits?.[id]?.details ?? null
+    // LCP: legacy largest-contentful-paint → lcp-phases-insight / lcp-discovery-insight numericValue or phases
+    let lcpMs: number | null = auditNum('largest-contentful-paint')
+    if (lcpMs == null) lcpMs = auditNum('lcp-phases-insight') ?? auditNum('lcp-discovery-insight')
+    if (lcpMs == null) {
+      const phases = insightDetail('lcp-phases-insight')
+      // phases subItems: ttfb, loadDelay, loadTime, renderDelay
+      if (phases?.items?.[0]) {
+        const it = phases.items[0]
+        const sum = (it.ttfb ?? 0) + (it.loadDelay ?? 0) + (it.loadTime ?? 0) + (it.renderDelay ?? 0)
+        if (sum > 0) lcpMs = sum
+      }
+    }
+    let lcpPhases: LighthouseMetrics['lcpPhases'] = null
+    {
+      const d: any = insightDetail('lcp-phases-insight')
+      const it = d?.items?.[0]
+      if (it) lcpPhases = { ttfb: it.ttfb ?? undefined, loadDelay: it.loadDelay ?? undefined, loadTime: it.loadTime ?? undefined, renderDelay: it.renderDelay ?? undefined }
+    }
+    // TTFB: server-response-time → document-latency-insight
+    let ttfbMs: number | null = auditNum('server-response-time')
+    if (ttfbMs == null) {
+      const d: any = insightDetail('document-latency-insight')
+      // document latency insight exposes serverResponseTime in items
+      ttfbMs = d?.items?.[0]?.serverResponseTime ?? auditNum('document-latency-insight')
+    }
     const metrics: LighthouseMetrics = {
-      lcpMs: lhr.audits?.['largest-contentful-paint']?.numericValue as number | null ?? null,
-      cls: lhr.audits?.['cumulative-layout-shift']?.numericValue as number | null ?? null,
-      tbtMs: lhr.audits?.['total-blocking-time']?.numericValue as number | null ?? null,
-      fcpMs: lhr.audits?.['first-contentful-paint']?.numericValue as number | null ?? null,
-      siMs: lhr.audits?.['speed-index']?.numericValue as number | null ?? null,
+      lcpMs,
+      cls: auditNum('cumulative-layout-shift') ?? auditNum('cls-culprits-insight'),
+      tbtMs: auditNum('total-blocking-time'),
+      fcpMs: auditNum('first-contentful-paint'),
+      siMs: auditNum('speed-index'),
+      inpMs: auditNum('interaction-to-next-paint') ?? auditNum('interaction-to-next-paint-insight') ?? auditNum('experimental-interaction-to-next-paint'),
+      ttfbMs,
+      lcpPhases,
     }
 
     const findings: Finding[] = []

@@ -189,6 +189,16 @@ export interface CssStats {
   customPropsDefined: number
   customPropsUnused: number
   mediaQueries: number
+  // Wallace v9.4+ expanded surface
+  unitsTotal?: number
+  unitsUnique?: number
+  unitsByProperty?: Record<string, Record<string, number>>
+  selectorsComplexityMean?: number
+  selectorsComplexityMax?: number
+  atrulesLayer?: number
+  atrulesContainer?: number
+  atrulesSupports?: number
+  rulesEmptyRatio?: number
   quality: { performance: number; maintainability: number; complexity: number }
   qualityViolations: { id: string; score: number; value: unknown }[]
   /** css-tree source locations for the issues we care about. */
